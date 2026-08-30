@@ -27,10 +27,17 @@ export interface SignalCandidate {
   sourceIds: Set<string>;
   wallets: Set<string>;
   buyWallets: Set<string>;
+  traderLabels?: Set<string>;
   twitterAccounts: Set<string>;
   firstTimestamp: number;
   aggregateBuyUsd: number;
+  observedMarketCap?: number;
+  marketCapObservedAt?: number;
   market?: Json;
+  tokenInfo?: Json;
+  tokenSecurity?: Json;
+  tokenPool?: Json;
+  trackedBuySafety?: Json;
 }
 
 const finite = (value: unknown): number | null => {
@@ -68,12 +75,14 @@ export function passesMarketGate(row:Json,cfg:Json):{passed:boolean;reasons:stri
   const top10=finite(m.top_10_holder_rate),rug=finite(m.rug_ratio),bundler=finite(m.bundler_rate??m.bundler_trader_amount_rate);
   const insider=finite(m.rat_trader_amount_rate??m.suspected_insider_hold_rate),entrapment=finite(m.entrapment_ratio),dev=finite(m.dev_team_hold_rate);
   required(liquidity!==null&&liquidity>=cfg.min_liquidity_usd,`liquidity below $${cfg.min_liquidity_usd}`);
+  const liquidityRatio=liquidity!==null&&marketCap!==null&&marketCap>0?liquidity/marketCap:null,minRatio=finite(cfg.min_liquidity_to_market_cap_ratio)??.05;
+  required(liquidityRatio!==null&&liquidityRatio>=minRatio,liquidityRatio===null?"liquidity-to-market-cap ratio unavailable":`liquidity-to-market-cap ratio below ${(minRatio*100).toFixed(1)}%`);
   required(marketCap!==null&&marketCap>=cfg.min_market_cap_usd&&marketCap<=cfg.max_market_cap_usd,"market cap outside configured range");
   required(holders!==null&&holders>=cfg.min_holders,`fewer than ${cfg.min_holders} holders`);
   required(rug!==null&&rug<=0.3,"rug ratio unavailable or above 0.30");
   required(!truthyFlag(m.is_wash_trading),"wash trading detected");
   required(!truthyFlag(m.is_honeypot),"honeypot detected");
-  required(top10!==null&&top10<=cfg.max_top_10_holder_rate,"top-10 concentration too high or unavailable");
+  required(top10!==null&&top10>0&&top10<=cfg.max_top_10_holder_rate,"top-10 concentration is 0%, too high, or unavailable");
   required(bundler!==null&&bundler<=cfg.max_bundler_rate,"bundler activity too high or unavailable");
   required(insider!==null&&insider<=cfg.max_rat_trader_rate,"insider/rat activity too high or unavailable");
   required(entrapment!==null&&entrapment<=(cfg.max_entrapment_rate??1),"entrapment activity too high or unavailable");

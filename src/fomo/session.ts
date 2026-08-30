@@ -63,11 +63,39 @@ export async function startFomoSessionBridge():Promise<FomoSessionBridge|null> {
       if(token&&saveFomoToken(tokenFile,token))console.log(`Fomo browser session supplied a refreshed bearer valid until ${new Date((tokenExpiry(token)??0)*1000).toISOString()}`);
     }catch(error){console.warn("Could not capture refreshed Fomo bearer",String(error));}
   };
-  context.on("request",request=>void capture(request));
+  const captureRequest=(request:Request)=>void capture(request);
+  context.on("request",captureRequest);
   try{if(!page.url().startsWith("https://fomo.family"))await page.goto("https://fomo.family",{waitUntil:"domcontentloaded",timeout:30000});}
   catch(error){console.warn("Fomo session page did not load; Chrome remains open for manual retry",String(error));}
-  const refresh=async()=>{try{const expiry=tokenExpiry(readStoredFomoToken(tokenFile));if(!expiry||expiry-Date.now()/1000<600){page=context.pages().find(candidate=>candidate.url().startsWith("https://fomo.family"))??page;await page.reload({waitUntil:"domcontentloaded",timeout:30000});}}catch(error){console.warn("Fomo browser session refresh failed",String(error));}};
-  const timer=setInterval(()=>void refresh(),300000);timer.unref();
-  console.log("Fomo session bridge attached to ordinary Chrome. Sign in once there; Google credentials remain inside Google/Privy.");
-  return {close:async()=>{clearInterval(timer);context.removeAllListeners("request");await browser.close();chrome?.kill();}};
+  const refreshBeforeExpiry=Math.max(60,Number(process.env.FOMO_BROWSER_REFRESH_BEFORE_EXPIRY_SECONDS??1800));
+  let stopped=false,refreshing=false,timer:NodeJS.Timeout|undefined;
+  const stopRefresh=(reason?:string)=>{
+    if(stopped)return;
+    stopped=true;
+    if(timer)clearInterval(timer);
+    context.off("request",captureRequest);
+    if(reason)console.warn(reason);
+  };
+  const disconnected=()=>stopRefresh("Fomo browser session closed; automatic bearer refresh is paused until the bot restarts.");
+  browser.on("disconnected",disconnected);
+  context.on("close",disconnected);
+  const refresh=async()=>{
+    if(stopped||refreshing)return;
+    refreshing=true;
+    try{
+      const expiry=tokenExpiry(readStoredFomoToken(tokenFile));
+      if(expiry&&expiry-Date.now()/1000>=refreshBeforeExpiry)return;
+      if(!browser.isConnected()){disconnected();return;}
+      page=context.pages().find(candidate=>!candidate.isClosed()&&candidate.url().startsWith("https://fomo.family"))??await context.newPage();
+      if(page.url().startsWith("https://fomo.family"))await page.reload({waitUntil:"domcontentloaded",timeout:30000});
+      else await page.goto("https://fomo.family",{waitUntil:"domcontentloaded",timeout:30000});
+    }catch(error){
+      const message=String(error);
+      if(/target (?:page, context or browser )?has been closed|browser has been closed|browser.*disconnected|connection closed|context.*closed/i.test(message))disconnected();
+      else console.warn("Fomo browser session refresh failed",message);
+    }finally{refreshing=false;}
+  };
+  await refresh();
+  if(!stopped){timer=setInterval(()=>void refresh(),300000);timer.unref();console.log("Fomo session bridge attached to ordinary Chrome. Sign in once there; Google credentials remain inside Google/Privy.");}
+  return {close:async()=>{stopRefresh();browser.off("disconnected",disconnected);context.off("close",disconnected);if(browser.isConnected())await browser.close();chrome?.kill();}};
 }

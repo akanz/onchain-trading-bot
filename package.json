@@ -14,6 +14,7 @@
     "scan:daily-wallets": "tsx scripts/daily-wallet-scan.ts",
     "scan:fomo-wallets": "node --import tsx scripts/fomo-wallet-scan.ts",
     "scan:wallets": "node --import tsx scripts/wallet-scan.ts",
+    "sync:wallets:local": "node --import tsx scripts/local-daily-sync.ts",
     "scan:signals": "node --import tsx src/scan-once.ts",
     "migrate:mongodb": "node --import tsx scripts/migrate-sqlite-to-mongodb.ts"
   },

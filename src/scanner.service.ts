@@ -19,6 +19,7 @@ export class ScannerService implements OnApplicationBootstrap,OnApplicationShutd
   private scanning=false;
   private walletRefreshRunning=false;
   private multipleMonitoring=false;
+  private rosterReloading=false;
   private walletRefreshProcess:ChildProcess|undefined;
   private lastWalletRefreshDate="";
   private announcedCooldown=0;
@@ -31,6 +32,7 @@ export class ScannerService implements OnApplicationBootstrap,OnApplicationShutd
     this.fomoSession=await startFomoSessionBridge();
     this.addInterval("signal-scan",Math.max(Number(process.env.SCAN_INTERVAL_MS??300000),30000),()=>void this.scanAndPublish());
     this.addInterval("multiple-monitor",Math.max(5000,Number(process.env.MULTIPLE_MONITOR_POLL_MS??15000)),()=>void this.pollTriggeredMultiples());
+    this.addInterval("mongo-roster-reload",Math.max(60000,Number(process.env.MONGO_ROSTER_RELOAD_MS??300000)),()=>void this.reloadMongoRoster());
     this.addInterval("wallet-refresh-check",60000,()=>void this.walletRefreshCheck());
     void this.scanAndPublish();void this.walletRefreshCheck();
   }
@@ -48,15 +50,16 @@ export class ScannerService implements OnApplicationBootstrap,OnApplicationShutd
   async scanAndPublish():Promise<void>{
     if(this.scanning||this.walletRefreshRunning||this.multipleMonitoring)return;
     const {tracker,botStore}=this.runtime,cooldownUntil=tracker.gmgn.cooldownUntil;
-    if(cooldownUntil){if(cooldownUntil!==this.announcedCooldown){this.announcedCooldown=cooldownUntil;this.logger.warn(`GMGN scans paused until ${new Date(cooldownUntil).toLocaleString()} to avoid extending the rate-limit ban.`);}return;}
-    this.announcedCooldown=0;this.scanning=true;
+    if(cooldownUntil){if(cooldownUntil!==this.announcedCooldown){this.announcedCooldown=cooldownUntil;this.logger.warn(`GMGN-dependent scans are paused until ${new Date(cooldownUntil).toLocaleString()}; Fomo wallet polling continues, but token alerts remain blocked until GMGN safety checks pass.`);}}
+    else this.announcedCooldown=0;this.scanning=true;
     try {
       const alerts:Alert[]=[],completedChains:Chain[]=[];
       for(const chain of this.runtime.scheduledChains)try{alerts.push(...await tracker.scan(chain));completedChains.push(chain);}catch(error){if(isRateLimit(error))throw error;this.logger.error(`${chain} scheduled scan failed: ${String(error)}`);}
-      const deliverable=alerts.filter(isDeliverableAlert),trending=completedChains.length?await tracker.latestTrendingAcross(completedChains,Number(process.env.TRENDING_DIGEST_LIMIT??10)):[],rankedDegen=process.env.DEGEN_MODE==="true"&&completedChains.length?tracker.latestDegenAcross(completedChains,Number(process.env.DEGEN_DIGEST_LIMIT??20)):[],degen=rankedDegen.length?await tracker.enrichDegenRows(rankedDegen):[],multipleAlerts=completedChains.length?await tracker.monitorCallMultiples(completedChains,[...trending,...degen]):[];
-      const multipleDelivery=await this.publishMultipleAlerts(multipleAlerts),trendingDelivery=completedChains.length?await this.telegram.trending(completedChains,trending):{attempted:0,sent:0,failed:0},degenDelivery=process.env.DEGEN_MODE==="true"&&completedChains.length?await this.telegram.degen(completedChains,degen):{attempted:0,sent:0,failed:0},alertDelivery:DeliveryResult={attempted:0,sent:0,failed:0};
+      const deliverable=alerts.filter(isDeliverableAlert),alertDelivery:DeliveryResult={attempted:0,sent:0,failed:0};
       for(const alert of deliverable){this.stream.publishAlert(alert);this.mergeDelivery(alertDelivery,await this.telegram.alert(alert));}
-      this.saveScanStatus({scanned_at:new Date().toISOString(),completed_chains:completedChains,diagnostics:tracker.diagnostics(completedChains),trending_contracts:trending.map(row=>this.trendingStatus(row)),degen_contracts:degen.map(row=>this.degenStatus(row)),multiple_alerts:multipleAlerts.map(alert=>({chain:alert.chain,address:alert.address,symbol:alert.symbol,milestone:alert.milestone,multiple:alert.multiple,age_seconds:alert.age_seconds})),alerts:deliverable.map(alert=>({chain:alert.chain,address:alert.address,tier:alert.tier,kind:alert.kind})),subscribed_chats:botStore.subscriptionCount(),telegram:{enabled:this.telegram.enabled,trending:trendingDelivery,degen:degenDelivery,multiples:multipleDelivery,alerts:alertDelivery}});
+      const gmgnAvailable=!tracker.gmgn.cooldownUntil,trending=gmgnAvailable&&completedChains.length?await tracker.latestTrendingAcross(completedChains,Number(process.env.TRENDING_DIGEST_LIMIT??10)):[],rankedDegen=gmgnAvailable&&process.env.DEGEN_MODE==="true"&&completedChains.length?tracker.latestDegenAcross(completedChains,Number(process.env.DEGEN_DIGEST_LIMIT??20)):[],degen=rankedDegen.length?await tracker.enrichDegenRows(rankedDegen):[],multipleAlerts=gmgnAvailable&&completedChains.length?await tracker.monitorCallMultiples(completedChains,[...trending,...degen]):[];
+      const multipleDelivery=await this.publishMultipleAlerts(multipleAlerts),trendingDelivery=gmgnAvailable&&completedChains.length&&trending.length?await this.telegram.trending(completedChains,trending):{attempted:0,sent:0,failed:0},degenDelivery=gmgnAvailable&&process.env.DEGEN_MODE==="true"&&completedChains.length?await this.telegram.degen(completedChains,degen):{attempted:0,sent:0,failed:0};if(trendingDelivery.sent>0)tracker.acknowledgeTrending(trending);
+      this.saveScanStatus({scanned_at:new Date().toISOString(),completed_chains:completedChains,diagnostics:tracker.diagnostics(completedChains),trending_contracts:trending.map(row=>this.trendingStatus(row)),degen_contracts:degen.map(row=>this.degenStatus(row)),multiple_alerts:multipleAlerts.map(alert=>({chain:alert.chain,address:alert.address,symbol:alert.symbol,milestone:alert.milestone,multiple:alert.multiple,age_seconds:alert.age_seconds})),alerts:deliverable.map(alert=>({chain:alert.chain,address:alert.address,symbol:alert.symbol,tier:alert.tier,kind:alert.kind,tracking_label:alert.tracking_label,traders:alert.traders,market_cap_at_detection:alert.market_cap_at_detection})),subscribed_chats:botStore.subscriptionCount(),telegram:{enabled:this.telegram.enabled,trending:trendingDelivery,degen:degenDelivery,multiples:multipleDelivery,alerts:alertDelivery}});
       this.stream.publishScan({scannedAt:new Date().toISOString(),found:deliverable.length+multipleAlerts.length});
     } catch(error){this.saveScanStatus({scanned_at:new Date().toISOString(),error:String(error),subscribed_chats:botStore.subscriptionCount()});this.logger.error("Scheduled scan failed",error instanceof Error?error.stack:String(error));}
     finally{this.scanning=false;}
@@ -72,6 +75,13 @@ export class ScannerService implements OnApplicationBootstrap,OnApplicationShutd
     finally{this.multipleMonitoring=false;}
   }
 
+  private async reloadMongoRoster():Promise<void>{
+    if(this.rosterReloading)return;this.rosterReloading=true;
+    try{await this.runtime.tracker.refreshTrackedWalletsFromMongo();}
+    catch(error){this.logger.error("Could not reload the tracked-wallet roster from MongoDB",error instanceof Error?error.stack:String(error));}
+    finally{this.rosterReloading=false;}
+  }
+
   private async walletRefreshCheck():Promise<void>{
     if(process.env.DAILY_WALLET_REFRESH_ENABLED==="false"||this.scanning||this.walletRefreshRunning||this.multipleMonitoring)return;
     const now=new Date(),hour=Math.min(23,Math.max(0,Number(process.env.DAILY_WALLET_REFRESH_HOUR_LOCAL??3))),date=`${now.getFullYear()}-${now.getMonth()+1}-${now.getDate()}`;if(now.getHours()!==hour||this.lastWalletRefreshDate===date)return;
@@ -80,5 +90,5 @@ export class ScannerService implements OnApplicationBootstrap,OnApplicationShutd
     finally{this.walletRefreshProcess=undefined;this.walletRefreshRunning=false;}
   }
 
-  async onApplicationShutdown():Promise<void>{for(const name of ["signal-scan","multiple-monitor","wallet-refresh-check"])try{this.scheduler.deleteInterval(name);}catch{}this.walletRefreshProcess?.kill("SIGTERM");if(this.fomoSession)await this.fomoSession.close();}
+  async onApplicationShutdown():Promise<void>{for(const name of ["signal-scan","multiple-monitor","mongo-roster-reload","wallet-refresh-check"])try{this.scheduler.deleteInterval(name);}catch{}this.walletRefreshProcess?.kill("SIGTERM");if(this.fomoSession)await this.fomoSession.close();}
 }

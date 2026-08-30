@@ -6,6 +6,56 @@ export function number(value: unknown, fallback: number | null = 0): number | nu
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 const flag = (v: unknown): boolean | null => v === true || [1, "1", "yes", "true"].includes(v as any) ? true : v === false || [0, "0", "no", "false"].includes(v as any) ? false : null;
+const firstNumber=(...values:unknown[]):number|null=>{for(const value of values){const parsed=number(value,null);if(parsed!==null)return parsed;}return null;};
+const firstPositiveNumber=(...values:unknown[]):number|null=>{let zero:number|null=null;for(const value of values){const parsed=number(value,null);if(parsed===null)continue;if(parsed>0)return parsed;if(parsed===0)zero=0;}return zero;};
+
+const holderAnalysisFields=(info:Json):unknown[]=>{
+  const stat=info.stat??{};
+  return [
+    stat.top_rat_trader_percentage,
+    stat.top_bundler_trader_percentage,
+    stat.top_entrapment_trader_percentage,
+    stat.top_bot_degen_percentage,
+    stat.bot_degen_rate,
+    stat.fresh_wallet_rate,
+    stat.top_10_holder_rate,
+    stat.dev_team_hold_rate,
+    stat.creator_hold_rate,
+    stat.private_vault_hold_rate,
+  ];
+};
+
+export function hasPopulatedHolderAnalysis(info:Json):boolean {
+  return holderAnalysisFields(info).some(value=>{const parsed=number(value,null);return parsed!==null&&parsed!==0;});
+}
+
+export function screenTrackedBuyToken(info:Json,security:Json,pool:Json,cfg:Json):Verdict {
+  const reasons:string[]=[],warnings:string[]=[];let failures=0;
+  const required=(ok:boolean,label:string)=>{reasons.push(`${ok?"PASS":"FAIL"} ${label}`);if(!ok)failures++;};
+  const maxRate=(value:number|null,limit:number,label:string)=>required(value!==null&&value<=limit,value===null?`${label} unavailable`:`${label} ${(value*100).toFixed(1)}% <= ${(limit*100).toFixed(1)}%`);
+  const price=number(info.price?.price,null),supply=firstNumber(info.circulating_supply,info.total_supply),marketCap=firstNumber(info.market_cap,info.price?.market_cap)??(price!==null&&supply!==null?price*supply:null),liquidity=firstNumber(pool.liquidity,info.liquidity,info.pool?.liquidity),holderCount=firstNumber(info.holder_count,info.stat?.holder_count),top10=firstPositiveNumber(security.top_10_holder_rate,info.stat?.top_10_holder_rate,info.dev?.top_10_holder_rate),minLiquidity=number(cfg.tracked_alert_min_liquidity_usd,500)??500,minRatio=number(cfg.tracked_alert_min_liquidity_to_market_cap_ratio,.01)??.01,minHolders=number(cfg.tracked_alert_min_holders,10)??10;
+  const honeypot=flag(security.is_honeypot??security.honeypot),blacklist=flag(security.is_blacklist??security.blacklist),openSource=flag(security.is_open_source??security.open_source),renounced=flag(security.is_renounced??security.owner_renounced??security.renounced),locked=flag(security.lock_summary?.is_locked),cannotSell=flag(security.can_not_sell);
+
+  required(Boolean(String(info.symbol??"").trim()),"GMGN token record exists");
+  if(cfg.require_honeypot_false){required(honeypot===false,"honeypot check passed");required(blacklist===false,"blacklist check passed");required(cannotSell!==true,"sellability check passed");}
+  else if(honeypot===true)required(false,"honeypot detected");
+  if(cfg.require_open_source)required(openSource===true,"contract source verified");
+  if(cfg.require_owner_renounced)required(renounced===true,"contract ownership renounced");
+  if(cfg.require_liquidity_locked)required(locked===true,"liquidity lock confirmed");
+  if(cfg.require_renounced_mint)required(flag(security.renounced_mint)===true,"mint authority renounced");
+  if(cfg.require_renounced_freeze)required(flag(security.renounced_freeze_account)===true,"freeze authority renounced");
+  required(liquidity!==null&&liquidity>=minLiquidity,`tracked-alert liquidity $${Math.round(liquidity??0).toLocaleString()} >= $${minLiquidity.toLocaleString()}`);
+  const liquidityRatio=liquidity!==null&&marketCap!==null&&marketCap>0?liquidity/marketCap:null;
+  required(liquidityRatio!==null&&liquidityRatio>=minRatio,liquidityRatio===null?"liquidity-to-market-cap ratio unavailable":`liquidity-to-market-cap ratio ${(liquidityRatio*100).toFixed(2)}% >= ${(minRatio*100).toFixed(2)}%`);
+  required(marketCap!==null&&marketCap>0,`market cap $${Math.round(marketCap??0).toLocaleString()} is available`);
+  required(holderCount!==null&&holderCount>=minHolders,`tracked-alert holders ${Math.round(holderCount??0)} >= ${minHolders}`);
+  required(hasPopulatedHolderAnalysis(info),"GMGN holder analysis is populated; an all-zero block is not accepted as safe");
+  required(top10!==null&&top10>0,"top-10 concentration is populated and above 0%");
+  maxRate(top10,cfg.max_top_10_holder_rate,"top-10 concentration");
+  if(cfg.require_honeypot_false){maxRate(number(security.buy_tax,null),cfg.max_buy_tax??.05,"buy tax");maxRate(number(security.sell_tax,null),cfg.max_sell_tax??.05,"sell tax");}
+  const passed=reasons.filter(reason=>reason.startsWith("PASS ")).length;
+  return {passed:failures===0,score:Math.round(1000*passed/Math.max(reasons.length+warnings.length,1))/10,reasons,warnings};
+}
 
 export function wilsonLowerBound(wins: number, total: number, z = 1.96): number {
   if (total <= 0) return 0;
@@ -25,20 +75,25 @@ export function scoreToken(info: Json, security: Json, pool: Json, cluster: Json
   const marketCap = price !== null && supply !== null ? price * supply : null;
   const liquidity = number(pool.liquidity ?? info.liquidity, null);
   const stat = info.stat ?? {};
-  const honeypot = flag(security.is_honeypot), openSource = flag(security.is_open_source ?? security.open_source);
+  const honeypot = flag(security.is_honeypot), blacklist=flag(security.is_blacklist??security.blacklist), openSource = flag(security.is_open_source ?? security.open_source);
   const renounced = flag(security.is_renounced ?? security.owner_renounced ?? security.renounced);
   const locked = flag(security.lock_summary?.is_locked);
-  if (cfg.require_honeypot_false) required(honeypot === false, "honeypot check passed"); else if (honeypot === true) required(false, "honeypot detected");
+  if (cfg.require_honeypot_false) { required(honeypot === false, "honeypot check passed"); required(blacklist===false,"blacklist check passed"); required(flag(security.can_not_sell)!==true,"sellability check passed"); } else if (honeypot === true) required(false, "honeypot detected");
   if (cfg.require_open_source) required(openSource === true, "contract source verified");
   if (cfg.require_owner_renounced) required(renounced === true, "contract ownership renounced");
   if (cfg.require_liquidity_locked) required(locked === true, "liquidity lock confirmed");
   if (cfg.require_renounced_mint) required(flag(security.renounced_mint) === true, "mint authority renounced");
   if (cfg.require_renounced_freeze) required(flag(security.renounced_freeze_account) === true, "freeze authority renounced");
   required(liquidity !== null && liquidity >= cfg.min_liquidity_usd, `liquidity $${Math.round(liquidity ?? 0).toLocaleString()}`);
+  const liquidityRatio=liquidity!==null&&marketCap!==null&&marketCap>0?liquidity/marketCap:null,minRatio=number(cfg.min_liquidity_to_market_cap_ratio,.05)??.05;
+  required(liquidityRatio!==null&&liquidityRatio>=minRatio,liquidityRatio===null?"liquidity-to-market-cap ratio unavailable":`liquidity-to-market-cap ratio ${(liquidityRatio*100).toFixed(2)}% >= ${(minRatio*100).toFixed(2)}%`);
   required(marketCap !== null && marketCap >= cfg.min_market_cap_usd && marketCap <= cfg.max_market_cap_usd, `market cap $${Math.round(marketCap ?? 0).toLocaleString()}`);
   required((number(info.holder_count, 0) ?? 0) >= cfg.min_holders, `holders ${number(info.holder_count, 0)}`);
   required((number(info.price?.volume_5m, 0) ?? 0) >= cfg.min_volume_5m_usd, `5m volume $${Math.round(number(info.price?.volume_5m, 0) ?? 0).toLocaleString()}`);
-  knownMax(number(security.top_10_holder_rate ?? stat.top_10_holder_rate, null), cfg.max_top_10_holder_rate, "top-10 concentration");
+  required(hasPopulatedHolderAnalysis(info),"GMGN holder analysis is populated; an all-zero block is not accepted as safe");
+  const top10=firstPositiveNumber(security.top_10_holder_rate,stat.top_10_holder_rate,info.dev?.top_10_holder_rate);
+  required(top10!==null&&top10>0,"top-10 concentration is populated and above 0%");
+  knownMax(top10, cfg.max_top_10_holder_rate, "top-10 concentration");
   knownMax(number(security.dev_team_hold_rate ?? stat.dev_team_hold_rate, null), cfg.max_dev_team_hold_rate, "dev-team holding");
   knownMax(number(security.bundler_trader_amount_rate ?? stat.top_bundler_trader_percentage, null), cfg.max_bundler_rate, "bundler activity");
   knownMax(number(stat.bot_degen_rate, null), cfg.max_bot_rate, "bot activity");

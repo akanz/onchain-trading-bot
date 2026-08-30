@@ -26,6 +26,9 @@ reports/
 tracked-wallets.json
 tracked-wallet-seeds.json
 fomo/data/*
+# Local Telegram history/export data can contain private chat content and user IDs.
+ChatExport_*/
+telegram-*.jsonl
 .agents/
 .codex/
 .DS_Store

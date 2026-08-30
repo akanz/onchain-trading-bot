@@ -15,6 +15,10 @@ services:
         value: 0.0.0.0
       - key: FOMO_BROWSER_SESSION
         value: "false"
+      - key: DAILY_WALLET_REFRESH_ENABLED
+        value: "false"
+      - key: MONGO_ROSTER_RELOAD_MS
+        value: "300000"
       - key: MONGODB_URI
         sync: false
       - key: MONGODB_DATABASE

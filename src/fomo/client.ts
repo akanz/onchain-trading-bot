@@ -63,13 +63,13 @@ export class FomoClient {
   }
 
   eligibleHolder(row:Json,chain:Chain="sol"):FomoHolder|null {
-    const costBasis=finite(row.costBasis),pnl=finite(row.pnl),realizedPnl=finite(row.realizedPnl),unrealizedPnl=finite(row.unrealizedPnl),value=finite(row.value),roiPercent=costBasis>0?pnl/costBasis*100:Infinity,user=row.user??{};
+    const costBasis=finite(row.costBasis),pnl=finite(row.pnl),realizedPnl=finite(row.realizedPnl),unrealizedPnl=finite(row.unrealizedPnl),value=finite(row.value),roiPercent=costBasis>0?pnl/costBasis*100:Infinity,realizedRoiPercent=costBasis>0?realizedPnl/costBasis*100:Infinity,unrealizedRoiPercent=costBasis>0?unrealizedPnl/costBasis*100:Infinity,user=row.user??{};
     if(!user.address||row.isDev||user.isRestricted||user.private)return null;
     if(costBasis<Number(process.env.FOMO_MIN_COST_BASIS_USD??100)||value<Number(process.env.FOMO_MIN_POSITION_VALUE_USD??100))return null;
-    if(!Number.isFinite(roiPercent)||roiPercent<Number(process.env.FOMO_MIN_POSITION_ROI_PERCENT??500))return null;
+    if(!Number.isFinite(roiPercent)||Math.max(roiPercent,realizedRoiPercent,unrealizedRoiPercent)<Number(process.env.FOMO_MIN_POSITION_ROI_PERCENT??500))return null;
     if(finite(user.numTrades)<Number(process.env.FOMO_MIN_USER_TRADES??20)||finite(user.totalVolume)<Number(process.env.FOMO_MIN_USER_VOLUME_USD??1000))return null;
     const wallet=chain==="sol"?user.address:user.evmAddress;if(!wallet)return null;
-    return {...row,wallet:String(wallet),roiPercent,realizedRoiPercent:realizedPnl/costBasis*100,unrealizedRoiPercent:unrealizedPnl/costBasis*100};
+    return {...row,wallet:String(wallet),roiPercent,realizedRoiPercent,unrealizedRoiPercent};
   }
 
   async discover():Promise<FomoToken[]> {

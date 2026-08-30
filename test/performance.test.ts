@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { TrackerService } from "../src/service.js";
 import { TrackerStore } from "../src/store.js";
+import { ScannerService } from "../src/scanner.service.js";
 
 const address="0x1111111111111111111111111111111111111111";
 
@@ -51,4 +52,31 @@ test("GMGN trigger hits cause exact price and safety rescans at each new multipl
 
   assert.deepEqual(await service.monitorTriggeredCallMultiples(["robinhood"],8_201),[]);
   store.close();
+});
+
+test("five-minute fallback reprices every active baseline even without a trigger-feed hit",async()=>{
+  let currentPrice=1;
+  const gmgn={cooldownUntil:0,tokenInfo:async()=>({symbol:"TEST",circulating_supply:100,price:{price:currentPrice}})};
+  const service=new TrackerService({default_chain:"robinhood",enabled_chains:["robinhood"]} as any,gmgn as any),store=new TrackerStore(":memory:");
+  (service as any).stores.set("robinhood",store);(service as any).evaluateToken=async()=>({verdict:{passed:true,score:90,warnings:[],reasons:[]}});
+  assert.deepEqual(await service.monitorCallMultiples(["robinhood"],[{chain:"robinhood",address,symbol:"TEST",price:1,market_cap:100,degen_sources:["PONS"]}],1_000),[]);
+  currentPrice=2.2;const [double]=await service.monitorCallMultiples(["robinhood"],[],1_300);assert.equal(double?.milestone,2);service.acknowledgeCallMultiple(double!);
+  currentPrice=3.1;const [triple]=await service.monitorCallMultiples(["robinhood"],[],1_600);assert.equal(triple?.milestone,3);
+  assert.deepEqual(store.callPerformanceSummary(1_600),{active_baselines:1,crossed_unannounced:1,max_observed_multiple:3.1,max_alerted_milestone:2,nearest_expiry:8_200});store.close();
+});
+
+test("multiplier updates survive ordinary quality failures but explicit rugs remain suppressed",async()=>{
+  let currentPrice=1,rug=false;
+  const gmgn={cooldownUntil:0,tokenInfo:async()=>({symbol:"TEST",circulating_supply:100,price:{price:currentPrice}})},service=new TrackerService({default_chain:"robinhood",enabled_chains:["robinhood"]} as any,gmgn as any),store=new TrackerStore(":memory:");
+  (service as any).stores.set("robinhood",store);(service as any).evaluateToken=async()=>({honeypot:rug,verdict:{passed:false,score:54,warnings:[],reasons:[rug?"FAIL honeypot detected":"FAIL fewer than 300 holders"]}});
+  await service.monitorCallMultiples(["robinhood"],[{chain:"robinhood",address,symbol:"TEST",price:1,market_cap:100,degen_sources:["PONS"]}],1_000);
+  currentPrice=2.2;const [review]=await service.monitorCallMultiples(["robinhood"],[],1_300);assert.equal(review?.milestone,2);assert.equal(review?.token_passed,false);assert.match(String(review?.token_snapshot?.verdict?.reasons?.[0]),/holders/);service.acknowledgeCallMultiple(review!);
+  rug=true;currentPrice=3.2;assert.deepEqual(await service.monitorCallMultiples(["robinhood"],[],1_600),[]);store.close();
+});
+
+test("scanner publishes and acknowledges a multiplier only after Telegram delivery",async()=>{
+  const alert:any={tier:"RESEARCH",kind:"MULTIPLE",chain:"robinhood",address,milestone:2,first_seen:1_000},published:any[]=[],acknowledged:any[]=[];
+  const runtime:any={tracker:{acknowledgeCallMultiple:(row:any)=>acknowledged.push(row)}},telegram:any={alert:async()=>({attempted:1,sent:1,failed:0})},stream:any={publishAlert:(row:any)=>published.push(row)},scanner=new ScannerService(runtime,telegram,stream,{} as any);
+  const delivered=await (scanner as any).publishMultipleAlerts([alert]);assert.deepEqual(delivered,{attempted:1,sent:1,failed:0});assert.deepEqual(published,[alert]);assert.deepEqual(acknowledged,[alert]);
+  telegram.alert=async()=>({attempted:1,sent:0,failed:1});await (scanner as any).publishMultipleAlerts([{...alert,milestone:3}]);assert.equal(acknowledged.length,1);
 });

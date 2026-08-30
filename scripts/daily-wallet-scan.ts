@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadEnvFile } from "node:process";
 import { GmgnClient, isRateLimit } from "../src/gmgn.js";
-import { isCleanGmgnTrendingTrader, trackWallet, validWalletAddress } from "../src/gmgn-wallet-analysis.js";
+import { gmgnTraderRoiEvidence, isCleanGmgnTrendingTrader, trackWallet, validWalletAddress } from "../src/gmgn-wallet-analysis.js";
 import { DATA_ROOT, loadConfig } from "../src/config.js";
 import { number, wilsonLowerBound } from "../src/scoring.js";
 import { detectRunnerMove, enteredBeforeMove } from "../src/runner-timing.js";
@@ -97,7 +97,8 @@ for(const result of tokenResults){
     const item=map.get(row.address)??{wallet:row.address,tokens:[],pre_move_tokens:[],runner_realized_profit:0,discovery_sources:[],source_events:[]};
     if(!item.discovery_sources.includes("gmgn_trending_500pct"))item.discovery_sources.push("gmgn_trending_500pct");
     const preMove=result.pre_move_wallets.includes(row.address);if(preMove&&!item.pre_move_tokens.includes(result.token.address)){item.pre_move_tokens.push(result.token.address);if(!item.discovery_sources.includes("gmgn_pre_move"))item.discovery_sources.push("gmgn_pre_move");if(item.pre_move_tokens.length>=2&&!item.discovery_sources.includes("gmgn_repeat_pre_move"))item.discovery_sources.push("gmgn_repeat_pre_move");}
-    item.tokens.push({address:result.token.address,symbol:result.token.symbol,realized_profit:number(row.realized_profit,0),realized_pnl:number(row.realized_pnl,0),roi_percent:(number(row.realized_pnl,0)??0)*100,pre_move:preMove});
+    const roiEvidence=gmgnTraderRoiEvidence(row);
+    item.tokens.push({address:result.token.address,symbol:result.token.symbol,...roiEvidence,roi_percent:roiEvidence.maximum_roi_percent,pre_move:preMove});
     item.runner_realized_profit+=(number(row.realized_profit,0)??0); map.set(row.address,item);
   }
 }
@@ -130,7 +131,7 @@ for(const chain of chains){
     const rp7=number(p7.realized_profit,0)??0,rp30=number(p30.realized_profit,0)??0,rpall=number(pall.total_realized_profit??pall.realized_profit,0)??0;
     const roi30=rp30/Math.max(number(p30.realized_profit_cost,0)??0,1),roiall=rpall/Math.max(number(pall.total_realized_profit_cost??pall.realized_profit_cost,0)??0,1);
     const trades30=(number(p30.buy,0)??0)+(number(p30.sell,0)??0);
-    if(rp7>=0&&rp30>=1000&&rpall>=5000&&roi30>=.05&&roiall>=.02&&trades30>=30&&trades30<=5000)profitPassed.push({...candidate,rp7,rp30,rpall,roi30,roiall,trades30});
+    if(rp7>=0&&rp30>=1000&&rpall>=5000&&roi30>=config.wallet.min_roi_30d&&roiall>=config.wallet.min_roi_all&&trades30>=30&&trades30<=5000)profitPassed.push({...candidate,rp7,rp30,rpall,roi30,roiall,trades30});
   }
   console.log(`${chain}: ${profitPassed.length} passed batch P&L gates; fetching individual sample stats`);
   const withStats=await mapLimit(profitPassed,1,async candidate=>{
@@ -166,11 +167,20 @@ for(const chain of chains){
 }
 
 const feedCounts=Object.fromEntries((["gmgn_smartmoney","gmgn_kol","gmgn_followed"] as FeedSource[]).map(source=>[source,feedResults.reduce((sum,result)=>sum+result.feeds.filter(feed=>feed.source===source).reduce((n,feed)=>n+feed.rows.length,0),0)]));
-const sortedProfiles=profiles.sort((a,b)=>b.score-a.score);
-const report={generated_at:now.toISOString(),definition:{window:"24h",minimum_runner_ath_market_cap_usd:minimumRunnerAthMarketCap,current_market_cap_is_not_a_discovery_floor:true,trader_limit_per_token:100,minimum_trending_trader_roi_percent:minimumTrendingTraderRoiPercent,minimum_runner_appearances:2,pre_move_method:{minimum_kol_wallets:minimumKolPushWallets,candle_resolution:"1m",maximum_entry_lead_seconds:preMoveLeadSeconds,pump_candle_percent:Number(process.env.GMGN_RUNNER_PUMP_CANDLE_PERCENT??20),pump_5m_percent:Number(process.env.GMGN_RUNNER_PUMP_5M_PERCENT??35),pump_volume_ratio:Number(process.env.GMGN_RUNNER_PUMP_VOLUME_RATIO??3)},chains,notes:"GMGN candidates come from >=500% realized-position-ROI traders on trending tokens whose historical-high market cap crossed the configured ATH floor; retraced tokens remain eligible regardless of current market cap. Smart Money, KOL, and personally followed-wallet feeds add candidates. One-hit wonders are excluded: a trending-derived wallet needs at least two runner appearances before the global 30-day P&L, ROI, Wilson win-rate, sample-size, recent-behavior, noisy-wallet, and independent-funder gates. For KOL-backed runners, 1-minute candles identify the first volume-confirmed expansion and first-acquisition time is scored as additional evidence only; it never qualifies a wallet by itself."},counts:{tokens:tokenJobs.length,raw_trader_rows:tokenResults.reduce((n,r)=>n+r.traders.length,0),retraced_below_ath_floor:tokenResults.filter(row=>Number(row.token.market_cap)<minimumRunnerAthMarketCap).length,kol_backed_runners:tokenResults.filter(row=>row.kol_push_wallets>=minimumKolPushWallets).length,detected_runner_moves:tokenResults.filter(row=>row.runner_move).length,pre_move_wallet_positions:tokenResults.reduce((sum,row)=>sum+row.pre_move_wallets.length,0),repeat_pre_move_wallets:sortedProfiles.filter(row=>(row.pre_move_tokens?.length??0)>=2).length,...feedCounts,qualified_wallets:sortedProfiles.length},tokens:tokenResults,tracked_wallets:sortedProfiles,qualified_wallets:sortedProfiles};
+const sortedProfiles:Json[]=profiles.sort((a,b)=>b.score-a.score).map(row=>({...row,tracking_tier:"qualified"}));
+const trackedByWallet=new Map<string,Json>();
+for(const [chain,candidates] of candidatesByChain)for(const candidate of candidates.values()){
+  if(!candidate.tokens.length)continue;
+  const max=(field:string)=>Math.max(...candidate.tokens.map((token:Json)=>Number(token[field]??-Infinity)));
+  const row:Json={...candidate,chain,source:"gmgn",tracking_tier:"elite_observed",verification_source:"gmgn_position_roi",max_position_roi_percent:max("maximum_roi_percent"),max_realized_position_roi_percent:max("realized_roi_percent"),max_unrealized_position_roi_percent:max("unrealized_roi_percent")};
+  trackedByWallet.set(`${chain}:${String(candidate.wallet).toLowerCase()}`,row);
+}
+for(const row of sortedProfiles){const key=`${row.chain}:${String(row.wallet).toLowerCase()}`,observed=trackedByWallet.get(key);trackedByWallet.set(key,{...(observed??{}),...row,tracking_tier:"qualified",discovery_sources:[...new Set([...(observed?.discovery_sources??[]),...(row.discovery_sources??[])])]});}
+const trackedWallets=[...trackedByWallet.values()].sort((a,b)=>Number(b.tracking_tier==="qualified")-Number(a.tracking_tier==="qualified")||Number(b.max_position_roi_percent??0)-Number(a.max_position_roi_percent??0));
+const report={generated_at:now.toISOString(),definition:{window:"24h",minimum_runner_ath_market_cap_usd:minimumRunnerAthMarketCap,current_market_cap_is_not_a_discovery_floor:true,trader_limit_per_token:100,minimum_trending_trader_roi_percent:minimumTrendingTraderRoiPercent,minimum_runner_appearances:2,pre_move_method:{minimum_kol_wallets:minimumKolPushWallets,candle_resolution:"1m",maximum_entry_lead_seconds:preMoveLeadSeconds,pump_candle_percent:Number(process.env.GMGN_RUNNER_PUMP_CANDLE_PERCENT??20),pump_5m_percent:Number(process.env.GMGN_RUNNER_PUMP_5M_PERCENT??35),pump_volume_ratio:Number(process.env.GMGN_RUNNER_PUMP_VOLUME_RATIO??3)},chains,notes:"The monitored GMGN roster includes every locally clean trader found with >=500% realized, unrealized, or total position ROI on a runner whose ATH market cap crossed the configured floor. Retraced tokens remain eligible regardless of current market cap. Repeat appearances, global realized P&L/ROI, Wilson win rate, sample size, recent behavior, and independent funding separately upgrade wallets to the qualified tier. Smart Money, KOL, and personally followed-wallet feeds add validation candidates but are not assumed profitable without position evidence."},counts:{tokens:tokenJobs.length,raw_trader_rows:tokenResults.reduce((n,r)=>n+r.traders.length,0),retraced_below_ath_floor:tokenResults.filter(row=>Number(row.token.market_cap)<minimumRunnerAthMarketCap).length,kol_backed_runners:tokenResults.filter(row=>row.kol_push_wallets>=minimumKolPushWallets).length,detected_runner_moves:tokenResults.filter(row=>row.runner_move).length,pre_move_wallet_positions:tokenResults.reduce((sum,row)=>sum+row.pre_move_wallets.length,0),repeat_pre_move_wallets:sortedProfiles.filter(row=>(row.pre_move_tokens?.length??0)>=2).length,...feedCounts,elite_observed_wallets:trackedWallets.filter(row=>row.tracking_tier==="elite_observed").length,tracked_wallets:trackedWallets.length,qualified_wallets:sortedProfiles.length},tokens:tokenResults,tracked_wallets:trackedWallets,qualified_wallets:sortedProfiles};
 writeFileSync(reportPath,JSON.stringify(report,null,2));
 const columns=["chain","wallet","score","runner_appearances","profit_7d","profit_30d","profit_all","roi_30d","winrate_30d","wilson_30d","tokens_30d","sample_unique_tokens","median_buy_usd"];
 const csv=[columns.join(","),...report.qualified_wallets.map((p:Json)=>[p.chain,p.wallet,p.score,p.tokens.length,p.rp7,p.rp30,p.rpall,p.roi30,p.winrate_30d,p.wilson_30d,p.token_count_30d,p.unique_tokens_in_sample,p.median_buy_usd].join(","))].join("\n");
 writeFileSync(summaryPath,csv);
 const mongo=await connectMongo(false);if(mongo){try{await new TrackedWalletRepository(mongo).replace("gmgn",report.generated_at,report.tracked_wallets);}finally{await mongo.close();}}
-console.log(JSON.stringify({reportPath,summaryPath,counts:report.counts,qualified_by_chain:Object.fromEntries(chains.map(chain=>[chain,profiles.filter(p=>p.chain===chain).length]))},null,2));
+console.log(JSON.stringify({reportPath,summaryPath,counts:report.counts,tracked_by_chain:Object.fromEntries(chains.map(chain=>[chain,trackedWallets.filter(p=>p.chain===chain).length])),qualified_by_chain:Object.fromEntries(chains.map(chain=>[chain,sortedProfiles.filter(p=>p.chain===chain).length]))},null,2));

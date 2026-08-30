@@ -1,0 +1,25 @@
+# Fomo API research
+
+This folder records the read-only Fomo endpoints used for discovery. It contains no bearer token and no execution routes.
+
+The production API expects `Authorization: Bearer $FOMO_TOKEN`. It also rejects otherwise valid Privy bearer tokens with status 430 unless requests resemble the first-party web client, so the client sends the web origin, referrer, and a browser user-agent. This behavior is undocumented and may change.
+
+## Discovery flow
+
+1. `POST /proxy/mostHeld` and `POST /proxy/trendingTokens` return token arrays under `responseObject`. A single response can mix Solana, BSC, Base, Robinhood, and Ethereum; every row is routed independently by `token.networkId` rather than assuming one chain for the whole response.
+2. `GET /hodlers/top` accepts batched query objects such as `tokens[0][address]=...&tokens[0][networkId]=...` and returns up to roughly 50 Fomo holders per token.
+3. Holder position ROI is calculated from Fomo's explicit fields as `pnl / costBasis * 100`, where Fomo's `pnl` is verified to equal `realizedPnl + unrealizedPnl`. The scanner requires at least `FOMO_MIN_POSITION_ROI_PERCENT` (default 500%); missing or zero cost basis never passes. Realized and unrealized ROI are retained separately in the report.
+4. The scanner fetches only `GET /v2/leaderboard/24h`, `/7d`, and `/30d` (150 profiles each), then merges users by Fomo ID while retaining every period rank and P&L field. It does not call the general `/v2/leaderboard` route. Set `FOMO_GMGN_VALIDATION=true` for an occasional GMGN 7d/30d/all-time cross-check. It is disabled by default because repeated live probes returned no indexed activity for Fomo-managed addresses and unnecessarily consumed the shared GMGN quota.
+5. The observed roster includes every public profile appearing in the 24h, 7d, or 30d leaderboard, every eligible >=500% most-held position, and eligible >=500% trending positions whose token ATH market cap crossed `FOMO_TRENDING_WALLET_MIN_ATH_MARKET_CAP_USD` (default $1m). The daily job enriches Fomo rows with GMGN's ATH price/supply evidence; current market cap is retained separately and is never used as this floor. These sources are merged by Fomo user ID and expanded into the user's public Solana/EVM addresses. Private and restricted profiles cannot be monitored.
+6. Qualification remains separate from observation. Fomo managed/relayed addresses frequently return zero GMGN activity even when Fomo reports extensive trading. In that case, `GET /trades?userId=...` supplies the latest 25 closed positions plus active positions. The high-confidence gate requires repeat realized profit, realized ROI, win rate, a Wilson-adjusted win rate, a minimum closed-trade sample, sensible median cost basis, and a bounded number of active tokens. Because Fomo exposes `closedCount`/`hasNextPage` but did not accept the tested `page`, `offset`, `skip`, or `limit` parameters, this is explicitly treated as a latest-closed-trade sample rather than a complete 30-day ledger. Reports label the evidence as `fomo_native`; it is never represented as GMGN-verified.
+7. Continuous activity monitoring uses `GET /v2/users/:id/swaps?limit=100` for the full observed roster with bounded concurrency. Only a swap with `outTradeId` is treated as a buy, and the bought contract is `outTokenAddress`. A change to an active position's `updatedAt` timestamp is never treated as a new buy. Activity older than `SIGNAL_LOOKBACK_SECONDS` is discarded, including after a temporary Fomo outage.
+
+## Automatic session renewal
+
+Set `FOMO_BROWSER_SESSION=true` and run the bot. It launches the installed Google Chrome executable normally with a dedicated profile at `.runtime/fomo-chrome-profile`, exposes a debugging endpoint on loopback only, and then attaches to that existing browser. It deliberately does not use Playwright's automated-browser launcher because Google can reject that login mode as insecure. Sign into Fomo with Google once in the ordinary Chrome window. Fomo's Privy SDK keeps its refresh token inside the browser; the local bridge observes authenticated requests to `prod-api.fomo.family` and writes only the renewed short-lived bearer to `.runtime/fomo-token.json` with mode `0600`. The bot reads that file before every Fomo request, so no restart or `.env` rewrite is needed. Never place a Google password, recovery code, or 2FA secret in this project.
+
+Run `npm run scan:fomo-wallets` to refresh `reports/fomo-wallet-scan-YYYY-MM-DD.json` and the gitignored live watch list at `fomo/data/qualified-wallets.json`. That file contains both `tracked_wallets` (the observed universe) and `qualified_wallets` (the high-confidence subset).
+
+`FOMO_TOKEN` is a short-lived Privy JWT. The client rejects it after its signed expiry time; update the value from an authenticated Fomo session when it expires. Fully unattended operation will require a refresh-token/session flow, which is not inferred from the access token.
+
+See `endpoints.json` for the machine-readable catalog. Generated reports belong in `reports/` and are gitignored. The bearer token stays in the project `.env`, which is also gitignored.

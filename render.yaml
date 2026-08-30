@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: onchain-trading-bot
+    runtime: node
+    plan: 0.5c-512mb
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 24.14.1
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: FOMO_BROWSER_SESSION
+        value: "false"
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DATABASE
+        value: onchain_trading_bot
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_ADMIN_USER_IDS
+        sync: false
+      - key: GMGN_API_KEY
+        sync: false
+      - key: GMGN_PRIVATE_KEY
+        sync: false
+      - key: FOMO_TOKEN
+        sync: false
+      - key: TWITTER_TOKEN
+        sync: false
+      - key: WEB_API_TOKEN
+        generateValue: true

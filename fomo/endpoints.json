@@ -1,0 +1,16 @@
+{
+  "base_url": "https://prod-api.fomo.family",
+  "observed_at": "2026-08-29",
+  "endpoints": [
+    {"name":"most-held","method":"POST","path":"/proxy/mostHeld","body":{}},
+    {"name":"trending","method":"POST","path":"/proxy/trendingTokens","body":{}},
+    {"name":"leaderboard-24h","method":"GET","path":"/v2/leaderboard/24h","notes":"Returns 150 users ranked by pnl24h"},
+    {"name":"leaderboard-7d","method":"GET","path":"/v2/leaderboard/7d","notes":"Returns 150 users ranked by pnl7d"},
+    {"name":"leaderboard-30d","method":"GET","path":"/v2/leaderboard/30d","notes":"Returns 150 users ranked by pnl30d"},
+    {"name":"top-holders","method":"GET","path":"/hodlers/top","query":"tokens[i][address], tokens[i][networkId]","notes":"Batch in groups of 10"},
+    {"name":"token-details","method":"POST","path":"/proxy/tokenDetails","body":{"tokenId":"<address>:<networkId>"}},
+    {"name":"user-trades","method":"GET","path":"/trades","query":"userId=<Fomo user UUID>","notes":"Returns activeTrades, the latest 25 closedTrades, hasNextPage, and closedCount; tested page/offset/skip parameters were ignored and limit was rejected"},
+    {"name":"user-swaps","method":"GET","path":"/v2/users/<Fomo user UUID>/swaps","query":"limit=100","notes":"Actual swap activity; outTradeId + outTokenAddress identify a token buy"}
+  ],
+  "network_ids": {"1399811149":"sol","56":"bsc","8453":"base","4663":"robinhood","1":"eth","1337":"unknown/internal"}
+}

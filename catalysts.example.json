@@ -1,0 +1,7 @@
+{
+  "base:0xTOKEN_CONTRACT_ADDRESS": {
+    "note": "Describe the independently verified catalyst and why it is not yet priced in.",
+    "source_url": "https://primary-source.example/announcement",
+    "expires_at": 0
+  }
+}

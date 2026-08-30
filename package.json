@@ -1,0 +1,34 @@
+{
+  "name": "gmgn-profitable-wallet-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-chain GMGN wallet tracker with Telegram alerts and a web-ready API.",
+  "scripts": {
+    "dev": "GMGN_CLI_PATH=/Users/akanz/.nvm/versions/node/v24.3.0/bin/gmgn-cli tsx watch src/index.ts",
+    "start": "node dist/src/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "scan:daily-wallets": "tsx scripts/daily-wallet-scan.ts",
+    "scan:fomo-wallets": "node --import tsx scripts/fomo-wallet-scan.ts",
+    "scan:wallets": "node --import tsx scripts/wallet-scan.ts",
+    "scan:signals": "node --import tsx src/scan-once.ts",
+    "migrate:mongodb": "node --import tsx scripts/migrate-sqlite-to-mongodb.ts"
+  },
+  "dependencies": {
+    "fastify": "^5.12.1",
+    "gmgn-cli": "1.5.9",
+    "grammy": "^1.46.0",
+    "mongodb": "^6.20.0",
+    "playwright-core": "^1.62.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=24 <25"
+  }
+}

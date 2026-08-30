@@ -3,11 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Multi-chain GMGN wallet tracker with Telegram alerts and a web-ready API.",
+  "description": "NestJS multi-chain wallet tracker with Telegram alerts and a web API.",
   "scripts": {
-    "dev": "GMGN_CLI_PATH=/Users/akanz/.nvm/versions/node/v24.3.0/bin/gmgn-cli tsx watch src/index.ts",
-    "start": "node dist/src/index.js",
-    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/src/main.js",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
     "scan:daily-wallets": "tsx scripts/daily-wallet-scan.ts",
@@ -17,13 +18,22 @@
     "migrate:mongodb": "node --import tsx scripts/migrate-sqlite-to-mongodb.ts"
   },
   "dependencies": {
-    "fastify": "^5.12.1",
+    "@nestjs/common": "^12.0.1",
+    "@nestjs/config": "^12.0.0",
+    "@nestjs/core": "^12.0.1",
+    "@nestjs/mongoose": "^12.0.0",
+    "@nestjs/platform-fastify": "^12.0.1",
+    "@nestjs/schedule": "^12.0.1",
     "gmgn-cli": "1.5.9",
     "grammy": "^1.46.0",
     "mongodb": "^6.20.0",
-    "playwright-core": "^1.62.1"
+    "mongoose": "^9.9.4",
+    "playwright-core": "^1.62.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
   },
   "devDependencies": {
+    "@nestjs/testing": "^12.0.1",
     "@types/node": "^26.4.0",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2"

@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { Injectable } from "@nestjs/common";
 import type { Alert } from "./types.js";
 
 export interface ScanEvent {
@@ -6,6 +7,7 @@ export interface ScanEvent {
   found: number;
 }
 
+@Injectable()
 export class AlertStream extends EventEmitter {
   publishAlert(alert: Alert): void {
     this.emit("alert", alert);

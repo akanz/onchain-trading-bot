@@ -6,12 +6,7 @@ export class MongoState {
   async close():Promise<void> {await this.client.close();}
 }
 
-export async function connectMongo(required=true):Promise<MongoState|undefined> {
-  const uri=process.env.MONGODB_URI??process.env.MONGO_URL;
-  if(!uri){if(required)throw new Error("MONGODB_URI is required for durable bot and tracked-wallet state");return undefined;}
-  const client=new MongoClient(uri,{serverApi:{version:ServerApiVersion.v1,strict:false,deprecationErrors:true},maxPoolSize:Number(process.env.MONGODB_MAX_POOL_SIZE??10)});
-  await client.connect();
-  const db=client.db(process.env.MONGODB_DATABASE??"onchain_trading_bot");
+export async function initializeMongo(client:MongoClient,db:Db):Promise<MongoState>{
   await db.command({ping:1});
   await Promise.all([
     db.collection("subscriptions").createIndex({chat_id:1,chain:1},{unique:true}),
@@ -26,6 +21,15 @@ export async function connectMongo(required=true):Promise<MongoState|undefined> 
     db.collection("tracked_wallets").createIndex({source:1,chain:1,wallet:1},{unique:true}),
   ]);
   return new MongoState(client,db);
+}
+
+export async function connectMongo(required=true):Promise<MongoState|undefined> {
+  const uri=process.env.MONGODB_URI??process.env.MONGO_URL;
+  if(!uri){if(required)throw new Error("MONGODB_URI is required for durable bot and tracked-wallet state");return undefined;}
+  const client=new MongoClient(uri,{serverApi:{version:ServerApiVersion.v1,strict:false,deprecationErrors:true},maxPoolSize:Number(process.env.MONGODB_MAX_POOL_SIZE??10)});
+  await client.connect();
+  const db=client.db(process.env.MONGODB_DATABASE??"onchain_trading_bot");
+  return initializeMongo(client,db);
 }
 
 export class TrackedWalletRepository {

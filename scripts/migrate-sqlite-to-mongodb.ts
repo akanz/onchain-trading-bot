@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { loadEnvFile } from "node:process";
 import { databasePath, loadConfig, ROOT } from "../src/config.js";
 import { connectMongo, TrackedWalletRepository } from "../src/mongo.js";
+import { loadTrackedWalletSeeds } from "../src/tracked-wallet-seeds.js";
 import type { Chain, Json } from "../src/types.js";
 
 const envPath=join(ROOT,".env");if(existsSync(envPath))loadEnvFile(envPath);
@@ -34,10 +35,15 @@ for(const chain of config.enabled_chains as Chain[]){
   } finally {db.close();}
 }
 
+const walletRows:{gmgn:Json[];fomo:Json[]}={gmgn:[],fomo:[]};
+const mergeWallets=(source:"gmgn"|"fomo",rows:Json[])=>{const merged=new Map(walletRows[source].map(row=>[`${row.chain}:${String(row.wallet).toLowerCase()}`,row]));for(const row of rows)if(row.chain&&row.wallet)merged.set(`${row.chain}:${String(row.wallet).toLowerCase()}`,row);walletRows[source]=[...merged.values()];};
 const reportDir=join(ROOT,"reports"),gmgnFile=existsSync(reportDir)?readdirSync(reportDir).filter(name=>/^daily-wallet-scan-.*\.json$/.test(name)&&!name.includes("cache")).sort().at(-1):undefined;
-if(gmgnFile){const report=JSON.parse(readFileSync(join(reportDir,gmgnFile),"utf8"));await new TrackedWalletRepository(mongo).replace("gmgn",report.generated_at??new Date().toISOString(),report.tracked_wallets??report.qualified_wallets??[]);counts.tracked_wallets_gmgn=(report.tracked_wallets??report.qualified_wallets??[]).length;}
+if(gmgnFile){const report=JSON.parse(readFileSync(join(reportDir,gmgnFile),"utf8"));mergeWallets("gmgn",report.tracked_wallets??report.qualified_wallets??[]);}
 const fomoPath=join(ROOT,"fomo","data","qualified-wallets.json");
-if(existsSync(fomoPath)){const report=JSON.parse(readFileSync(fomoPath,"utf8"));await new TrackedWalletRepository(mongo).replace("fomo",report.generated_at??new Date().toISOString(),report.tracked_wallets??report.qualified_wallets??[]);counts.tracked_wallets_fomo=(report.tracked_wallets??report.qualified_wallets??[]).length;}
+if(existsSync(fomoPath)){const report=JSON.parse(readFileSync(fomoPath,"utf8"));mergeWallets("fomo",report.tracked_wallets??report.qualified_wallets??[]);}
+for(const seedPath of [join(ROOT,"tracked-wallet-seeds.json"),join(ROOT,"tracked-wallets.json")])for(const row of loadTrackedWalletSeeds(seedPath)){const source=String(row.source);if(source==="gmgn"||source==="fomo")mergeWallets(source,[row]);}
+const generatedAt=new Date().toISOString(),walletRepository=new TrackedWalletRepository(mongo);
+for(const source of ["gmgn","fomo"] as const)if(walletRows[source].length){await walletRepository.replace(source,generatedAt,walletRows[source]);counts[`tracked_wallets_${source}`]=walletRows[source].length;}
 
 console.log(JSON.stringify({ok:true,migrated:counts},null,2));
 await mongo.close();

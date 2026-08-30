@@ -23,6 +23,8 @@ coverage/
 *.log
 .runtime/
 reports/
+tracked-wallets.json
+tracked-wallet-seeds.json
 fomo/data/*
 .agents/
 .codex/

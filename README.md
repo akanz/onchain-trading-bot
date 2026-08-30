@@ -19,7 +19,7 @@ Each chain has an independent candidate set, qualified roster, event history, an
 
 ## Telegram bot + web API (TypeScript)
 
-TypeScript is the bot runtime and web API implementation. MongoDB is the durable store; SQLite is only read by the one-time migration command.
+NestJS on TypeScript is the bot runtime and web API implementation. The application is split into API, database, scanner, Telegram, and runtime modules; Nest manages the MongoDB connection through Mongoose, while the repository layer uses native collections for heterogeneous market documents. SQLite is only read by the one-time migration command.
 
 Requires Node.js 24 or newer:
 
@@ -36,6 +36,8 @@ Set `MONGODB_URI`, `TELEGRAM_BOT_TOKEN`, and your numeric Telegram user ID in `T
 The default X watch list is `elonmusk,WhiteHouse,realDonaldTrump,cz_binance`; change `TWITTER_ACCOUNTS` to a comma-separated list. Only explicit contract addresses in recent posts are associated with candidates, and an X mention is never sufficient to send a token.
 
 Fomo discovery lives in [`fomo/`](fomo/README.md). `npm run scan:fomo-wallets` merges the 24h, 7d, and 30d leaderboards with most-held and trending-token holders. Every public leaderboard profile is observed; most-held wallets need at least 500% position PnL, and trending-token wallets need at least 500% PnL on a token whose ATH market cap crossed $1m. A retrace below $1m does not remove its wallets from the research universe. Closed-trade profitability gates separately mark the high-confidence subset. The continuous scanner checks recent swaps for the full observed Fomo roster. Its browser-session bridge keeps the short-lived Fomo bearer current without storing Google credentials.
+
+An optional local `tracked-wallet-seeds.json` can hold a manual roster for contract-specific research. It is ignored by Git and can be imported with `npm run migrate:mongodb`; MongoDB remains the deployed source of truth. GMGN entries are polled through GMGN on-chain wallet activity, while Fomo entries retain their public Fomo user ID and use Fomo's native user-swap feed because Fomo profile addresses often do not appear in GMGN. Generated daily rosters remain separate and continue to refresh normally.
 
 Robinhood degen discovery also reads Pons' public active-launch and graduated catalogs every five minutes. It snapshots price and bonding-curve progress locally, then labels new active launches, near-graduation launches, just-graduated tokens, 5m/30m price surges, and 30m progress surges. A capped set receives GMGN K-line confirmation so Pons discovery does not consume the GMGN rate-limit budget unchecked. The top-20 degen digest reserves 75% of its available slots for Robinhood when enough Robinhood candidates exist. Ranked Pons candidates are rendered as individual cards enriched with GMGN market activity and top-holder data, plus Pons, chart, explorer, social, GMGN, Axiom, and direct third-party trading-bot links. Bot links contain no borrowed referral IDs and never submit a trade. Pons names and symbols are escaped display metadata only; they are never treated as instructions or as evidence that a contract is safe.
 

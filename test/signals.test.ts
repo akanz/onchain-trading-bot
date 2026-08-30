@@ -7,6 +7,7 @@ import { extractContractAddresses, hasTrackedBuyCluster, passesMarketGate, shoul
 import { TrackerStore } from "../src/store.js";
 import { TrackerService, rotatingSlice } from "../src/service.js";
 import { loadConfig } from "../src/config.js";
+import { GmgnRateLimitError } from "../src/gmgn.js";
 
 const cfg={min_liquidity_usd:50000,min_market_cap_usd:100000,max_market_cap_usd:20000000,min_holders:300,max_top_10_holder_rate:.3,max_dev_team_hold_rate:.1,max_bundler_rate:.15,max_rat_trader_rate:.05,max_entrapment_rate:.15};
 const safe={address:"0x1111111111111111111111111111111111111111",liquidity:100000,market_cap:1000000,holder_count:1000,rug_ratio:0,top_10_holder_rate:.2,bundler_rate:.02,rat_trader_amount_rate:.01,entrapment_ratio:.02,is_wash_trading:false,is_honeypot:false};
@@ -25,6 +26,12 @@ test("tracked-wallet fallback batches rotate through the full roster",()=>{
   assert.deepEqual(rotatingSlice(wallets,2,2),["c","d"]);
   assert.deepEqual(rotatingSlice(wallets,4,2),["e","a"]);
   assert.deepEqual(rotatingSlice(wallets,1,20),["b","c","d","e","a"]);
+});
+
+test("tracked-wallet fallback stops on rate limit without discarding core scan state",async()=>{
+  let calls=0;const gmgn={followedWallets:async()=>[],walletActivity:async()=>{calls++;throw new GmgnRateLimitError("limited",Date.now()+30_000);}},service=new TrackerService({...loadConfig(),default_chain:"sol",enabled_chains:["sol"]} as any,gmgn as any);
+  (service as any).mongoTrackedWalletRows=[{source:"gmgn",chain:"sol",wallet:"wallet-a",tracking_tier:"qualified"},{source:"gmgn",chain:"sol",wallet:"wallet-b",tracking_tier:"qualified"}];
+  await (service as any).collectWalletSignals("sol",new Map());assert.equal(calls,1);await service.close();
 });
 
 test("tracked-wallet alerts upgrade from observe to potential to buy signal",async()=>{

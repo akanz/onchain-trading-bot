@@ -80,3 +80,8 @@ test("scanner publishes and acknowledges a multiplier only after Telegram delive
   const delivered=await (scanner as any).publishMultipleAlerts([alert]);assert.deepEqual(delivered,{attempted:1,sent:1,failed:0});assert.deepEqual(published,[alert]);assert.deepEqual(acknowledged,[alert]);
   telegram.alert=async()=>({attempted:1,sent:0,failed:1});await (scanner as any).publishMultipleAlerts([{...alert,milestone:3}]);assert.equal(acknowledged.length,1);
 });
+
+test("scanner delivers completed trending results when a later GMGN call starts cooldown",async()=>{
+  let cooldown=0,trendingDeliveries=0,acknowledged=0;const row:any={chain:"sol",address,symbol:"TREND"},tracker:any={gmgn:{get cooldownUntil(){return cooldown;}},scan:async()=>{cooldown=Date.now()+30_000;return [];},latestTrendingAcross:async()=>[row],diagnostics:()=>({}),acknowledgeTrending:()=>{acknowledged++;}},runtime:any={scheduledChains:["sol"],tracker,botStore:{subscriptionCount:()=>1}},telegram:any={enabled:true,alert:async()=>({attempted:0,sent:0,failed:0}),trending:async()=>{trendingDeliveries++;return {attempted:1,sent:1,failed:0};},degen:async()=>({attempted:0,sent:0,failed:0})},stream:any={publishAlert:()=>{},publishScan:()=>{}},scanner=new ScannerService(runtime,telegram,stream,{} as any);
+  (scanner as any).saveScanStatus=()=>{};await scanner.scanAndPublish();assert.equal(trendingDeliveries,1);assert.equal(acknowledged,1);
+});

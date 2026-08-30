@@ -182,9 +182,9 @@ export class TrackerService {
     const qualifiedWallets=this.loadTrackedWallets().get(chain)??[],qualified=new Set(qualifiedWallets.map(addressKey));
     try {for(const row of await this.gmgn.followedWallets(chain,100))if(qualified.has(addressKey(String(row.maker??""))))this.addEvent(map,chain,row,"followed_wallet");}catch(error){if(isRateLimit(error))throw error;console.warn(`${chain}: GMGN followed-wallet feed unavailable`,String(error));}
     if(process.env.DISABLE_TRACKED_WALLET_FALLBACK==="true")return;
-    const limit=Math.max(0,Math.floor(envNumber("TRACKED_WALLET_FALLBACK_LIMIT",25))),start=qualifiedWallets.length?(this.walletScanCursor.get(chain)??0)%qualifiedWallets.length:0,batch=rotatingSlice(qualifiedWallets,start,limit);
+    const limit=Math.max(0,Math.floor(envNumber("TRACKED_WALLET_FALLBACK_LIMIT",5))),start=qualifiedWallets.length?(this.walletScanCursor.get(chain)??0)%qualifiedWallets.length:0,batch=rotatingSlice(qualifiedWallets,start,limit);
     if(qualifiedWallets.length)this.walletScanCursor.set(chain,(start+batch.length)%qualifiedWallets.length);
-    for(const wallet of batch){try{for(const row of await this.gmgn.walletActivity(chain,wallet,20))if(row.event_type==="buy")this.addEvent(map,chain,{...row,wallet},"tracked_wallet");}catch(error){if(isRateLimit(error))throw error;console.warn(`${chain}: could not scan tracked wallet ${wallet}`,String(error));}}
+    for(const wallet of batch){try{for(const row of await this.gmgn.walletActivity(chain,wallet,20))if(row.event_type==="buy")this.addEvent(map,chain,{...row,wallet},"tracked_wallet");}catch(error){if(isRateLimit(error)){console.warn(`${chain}: tracked-wallet fallback paused at ${wallet}; core market results from this scan are preserved`,String(error));break;}console.warn(`${chain}: could not scan tracked wallet ${wallet}`,String(error));}}
   }
   private async refreshTwitter():Promise<void> {
     if(!this.twitter.enabled)return;const every=envNumber("TWITTER_SCAN_EVERY_MS",120000),now=Date.now();if(now-this.twitterScanAt<every)return;this.twitterScanAt=now;

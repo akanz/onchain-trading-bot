@@ -24,7 +24,6 @@ coverage/
 .runtime/
 reports/
 fomo/data/*
-!fomo/data/.gitkeep
 .agents/
 .codex/
 .DS_Store

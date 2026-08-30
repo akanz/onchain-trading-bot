@@ -19,7 +19,7 @@ Each chain has an independent candidate set, qualified roster, event history, an
 
 ## Telegram bot + web API (TypeScript)
 
-TypeScript is now the primary runtime because the tracker is intended to run as a Telegram bot and later serve a web dashboard. The original Python CLI remains available as a legacy research reference. The bot runtime uses MongoDB; SQLite is only read by the one-time migration command.
+TypeScript is the bot runtime and web API implementation. MongoDB is the durable store; SQLite is only read by the one-time migration command.
 
 Requires Node.js 24 or newer:
 
@@ -128,69 +128,6 @@ The Railway MongoDB template is self-hosted and unmanaged. MongoDB Atlas is pref
 ### Render
 
 `render.yaml` defines the equivalent Render web service and prompts for secrets during Blueprint creation. MongoDB removes the need for a Render persistent disk. Do not use a free sleeping web service for production alerts: a sleeping instance cannot continuously poll Telegram or perform scans on schedule. The Fomo browser-session bridge is disabled in hosted environments; update `FOMO_TOKEN` as a secret when it expires until a server-safe refresh flow is implemented.
-
-## Python CLI (legacy research interface)
-
-The GMGN API and signing keys remain in `~/.config/gmgn/.env`, outside this project. Do not copy them here.
-
-```bash
-python3 -m unittest -v
-```
-
-Tune `config.json` before relying on alerts. Both local config files may be committed if they contain no secrets; `catalysts.json` should contain only public-source notes and URLs.
-
-## Workflow
-
-Commands default to Solana. Select one chain with `--chain`, placed before the subcommand:
-
-```bash
-python3 tracker.py --chain bsc discover-runners
-python3 tracker.py --chain base discover-runners
-python3 tracker.py --chain robinhood discover-runners
-```
-
-Or operate on every enabled chain:
-
-```bash
-python3 tracker.py --all-chains discover-runners
-```
-
-Automatically pulled runners use chain-specific safety filters before their top traders are cross-checked.
-
-Or seed wallets from selected runner contract addresses (one winner is not enough):
-
-```bash
-python3 tracker.py --chain bsc seed-token <BSC_TOKEN_CA>
-```
-
-Profile the queued candidates. Start small because this uses multiple API calls per wallet:
-
-```bash
-python3 tracker.py --all-chains profile --max-wallets 25
-python3 tracker.py --all-chains roster
-```
-
-After changing thresholds, reapply them to stored profile evidence without spending API calls:
-
-```bash
-python3 tracker.py --all-chains rescore
-```
-
-Scan the current Smart Money feed using only qualified wallets:
-
-```bash
-python3 tracker.py --all-chains scan --limit 200
-```
-
-Evaluate a contract independently of clustering:
-
-```bash
-python3 tracker.py --chain base evaluate-token <BASE_TOKEN_CA>
-```
-
-For continuous use, schedule `scan` every 30–60 seconds, `discover-runners` every few hours, and `profile` daily. Do not run `profile` every scan cycle. GMGN rate limits are shared across chains; the tracker stops on a 429 rather than extending the cooldown. A production deployment should add a notification sink, historical runner discovery, RPC-level funding-graph enrichment, and outcome labels for precision/recall backtests before any execution integration.
-
-Solana keeps its existing `tracker.sqlite3`. Other enabled chains use `tracker.bsc.sqlite3`, `tracker.base.sqlite3`, and `tracker.robinhood.sqlite3`. All are ignored by git.
 
 ## Alert semantics
 

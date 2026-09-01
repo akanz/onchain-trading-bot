@@ -33,7 +33,7 @@ export function screenTrackedBuyToken(info:Json,security:Json,pool:Json,cfg:Json
   const reasons:string[]=[],warnings:string[]=[];let failures=0;
   const required=(ok:boolean,label:string)=>{reasons.push(`${ok?"PASS":"FAIL"} ${label}`);if(!ok)failures++;};
   const maxRate=(value:number|null,limit:number,label:string)=>required(value!==null&&value<=limit,value===null?`${label} unavailable`:`${label} ${(value*100).toFixed(1)}% <= ${(limit*100).toFixed(1)}%`);
-  const price=number(info.price?.price,null),supply=firstNumber(info.circulating_supply,info.total_supply),marketCap=firstNumber(info.market_cap,info.price?.market_cap)??(price!==null&&supply!==null?price*supply:null),liquidity=firstNumber(pool.liquidity,info.liquidity,info.pool?.liquidity),holderCount=firstNumber(info.holder_count,info.stat?.holder_count),top10=firstPositiveNumber(security.top_10_holder_rate,info.stat?.top_10_holder_rate,info.dev?.top_10_holder_rate),minLiquidity=number(cfg.tracked_alert_min_liquidity_usd,500)??500,minRatio=number(cfg.tracked_alert_min_liquidity_to_market_cap_ratio,.01)??.01,minHolders=number(cfg.tracked_alert_min_holders,10)??10;
+  const price=number(info.price?.price,null),supply=firstNumber(info.circulating_supply,info.total_supply),marketCap=firstNumber(info.market_cap,info.price?.market_cap)??(price!==null&&supply!==null?price*supply:null),liquidity=firstNumber(pool.liquidity,info.liquidity,info.pool?.liquidity),holderCount=firstNumber(info.holder_count,info.stat?.holder_count),top10=firstPositiveNumber(security.top_10_holder_rate,info.stat?.top_10_holder_rate,info.dev?.top_10_holder_rate),minLiquidity=number(cfg.tracked_alert_min_liquidity_usd,500)??500,minRatio=number(cfg.tracked_alert_min_liquidity_to_market_cap_ratio,.01)??.01,maxRatio=number(cfg.tracked_alert_max_liquidity_to_market_cap_ratio,10)??10,minMarketCap=number(cfg.tracked_alert_min_market_cap_usd,5000)??5000,minHolders=number(cfg.tracked_alert_min_holders,10)??10;
   const honeypot=flag(security.is_honeypot??security.honeypot),blacklist=flag(security.is_blacklist??security.blacklist),openSource=flag(security.is_open_source??security.open_source),renounced=flag(security.is_renounced??security.owner_renounced??security.renounced),locked=flag(security.lock_summary?.is_locked),cannotSell=flag(security.can_not_sell);
 
   required(Boolean(String(info.symbol??"").trim()),"GMGN token record exists");
@@ -47,11 +47,12 @@ export function screenTrackedBuyToken(info:Json,security:Json,pool:Json,cfg:Json
   required(liquidity!==null&&liquidity>=minLiquidity,`tracked-alert liquidity $${Math.round(liquidity??0).toLocaleString()} >= $${minLiquidity.toLocaleString()}`);
   const liquidityRatio=liquidity!==null&&marketCap!==null&&marketCap>0?liquidity/marketCap:null;
   required(liquidityRatio!==null&&liquidityRatio>=minRatio,liquidityRatio===null?"liquidity-to-market-cap ratio unavailable":`liquidity-to-market-cap ratio ${(liquidityRatio*100).toFixed(2)}% >= ${(minRatio*100).toFixed(2)}%`);
-  required(marketCap!==null&&marketCap>0,`market cap $${Math.round(marketCap??0).toLocaleString()} is available`);
+  required(liquidityRatio!==null&&liquidityRatio<=maxRatio,liquidityRatio===null?"liquidity-to-market-cap ratio unavailable":`liquidity-to-market-cap ratio ${(liquidityRatio*100).toFixed(2)}% <= ${(maxRatio*100).toFixed(2)}%`);
+  required(marketCap!==null&&marketCap>=minMarketCap,`tracked-alert market cap $${Math.round(marketCap??0).toLocaleString()} >= $${minMarketCap.toLocaleString()}`);
   required(holderCount!==null&&holderCount>=minHolders,`tracked-alert holders ${Math.round(holderCount??0)} >= ${minHolders}`);
   required(hasPopulatedHolderAnalysis(info),"GMGN holder analysis is populated; an all-zero block is not accepted as safe");
   required(top10!==null&&top10>0,"top-10 concentration is populated and above 0%");
-  maxRate(top10,cfg.max_top_10_holder_rate,"top-10 concentration");
+  maxRate(top10,number(cfg.tracked_alert_max_top_10_holder_rate,cfg.max_top_10_holder_rate)??cfg.max_top_10_holder_rate,"top-10 concentration");
   if(cfg.require_honeypot_false){maxRate(number(security.buy_tax,null),cfg.max_buy_tax??.05,"buy tax");maxRate(number(security.sell_tax,null),cfg.max_sell_tax??.05,"sell tax");}
   const passed=reasons.filter(reason=>reason.startsWith("PASS ")).length;
   return {passed:failures===0,score:Math.round(1000*passed/Math.max(reasons.length+warnings.length,1))/10,reasons,warnings};

@@ -1,12 +1,15 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type { Chain, Json, TrackerConfig } from "./types.js";
+import { priorityChains } from "./chain-priority.js";
 
 export const ROOT = resolve(process.env.TRACKER_ROOT ?? process.cwd());
 export const DATA_ROOT = resolve(process.env.TRACKER_DATA_ROOT ?? ROOT);
 
 export function loadConfig(path = join(ROOT, "config.json")): TrackerConfig {
-  return JSON.parse(readFileSync(path, "utf8")) as TrackerConfig;
+  const config=JSON.parse(readFileSync(path, "utf8")) as TrackerConfig;
+  config.enabled_chains=priorityChains(config.enabled_chains);
+  return config;
 }
 
 export function configForChain(base: TrackerConfig, chain: Chain): Json {

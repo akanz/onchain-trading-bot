@@ -1,12 +1,10 @@
-import { execFile } from "node:child_process";
+import { execFile, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { promisify } from "node:util";
 import { DATA_ROOT, ROOT } from "./config.js";
 import { GmgnCooldownError, GmgnRateGate, gmgnRequestWeight, parseRateLimitReset } from "./gmgn-rate-limit.js";
 import type { Chain, Json } from "./types.js";
 
-const exec = promisify(execFile);
 const sleep=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
 const transientNetwork=(error:unknown)=>/ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|ECONNREFUSED|fetch failed|socket hang up|SocketError|other side closed|bad record mac/i.test(String(error));
 
@@ -19,14 +17,22 @@ export class GmgnClient {
   private configCheck:Promise<void>|undefined;
   private readonly cliPath = process.env.GMGN_CLI_PATH ?? [join(ROOT,"node_modules",".bin","gmgn-cli"),join(dirname(process.execPath),"gmgn-cli")].find(existsSync) ?? "gmgn-cli";
   private readonly gate=new GmgnRateGate({stateFile:process.env.GMGN_COOLDOWN_FILE??join(DATA_ROOT,".runtime","gmgn-rate-limit.json")});
+  private readonly children=new Set<ChildProcess>();
+  private closed=false;
 
   get cooldownUntil():number{return this.gate.cooldownUntil;}
   get cooldownRemainingMs():number{return this.gate.cooldownRemainingMs;}
 
-  private invoke(args: string[], options: { maxBuffer?: number } = {}) {
-    if (existsSync(this.cliPath)) return exec(process.execPath, [this.cliPath, ...args], options);
-    return exec("gmgn-cli", args, options);
+  private invoke(args: string[], options: { maxBuffer?: number } = {}):Promise<{stdout:string;stderr:string}> {
+    if(this.closed)return Promise.reject(new GmgnError("GMGN client is shutting down"));
+    const command=existsSync(this.cliPath)?process.execPath:"gmgn-cli",commandArgs=existsSync(this.cliPath)?[this.cliPath,...args]:args;
+    return new Promise((resolve,reject)=>{
+      const child=execFile(command,commandArgs,{...options,encoding:"utf8"},(error,stdout,stderr)=>{this.children.delete(child);if(error){Object.assign(error,{stdout,stderr});reject(error);}else resolve({stdout,stderr});});
+      this.children.add(child);child.once("error",()=>this.children.delete(child));
+    });
   }
+
+  close():void {this.closed=true;for(const child of this.children)if(child.exitCode===null)child.kill("SIGTERM");this.children.clear();}
 
   async checkConfig(): Promise<void> {
     if (this.checked) return;
@@ -65,8 +71,9 @@ export class GmgnClient {
   }
   async smartMoney(chain:Chain,limit=100):Promise<Json[]> { return (await this.run("track","smartmoney","--chain",chain,"--side","buy","--limit",String(limit))).list??[]; }
   async kol(chain:Chain,limit=100):Promise<Json[]> { return (await this.run("track","kol","--chain",chain,"--side","buy","--limit",String(limit))).list??[]; }
-  async followedWallets(chain:Chain,limit=100):Promise<Json[]> { return (await this.run("track","follow-wallet","--chain",chain,"--side","buy","--limit",String(limit))).list??[]; }
+  async followedWallets(chain:Chain,limit=100):Promise<Json[]> { return (await this.run("track","follow-wallet","--chain",chain,"--limit",String(limit))).list??[]; }
   async walletActivity(chain:Chain,wallet:string,limit=30):Promise<Json[]> { return (await this.run("portfolio","activity","--chain",chain,"--wallet",wallet,"--limit",String(limit),"--type","buy","--type","sell")).activities??[]; }
+  async walletTokenActivity(chain:Chain,wallet:string,token:string,limit=50):Promise<Json[]> { return (await this.run("portfolio","activity","--chain",chain,"--wallet",wallet,"--token",token,"--limit",String(limit),"--type","buy","--type","sell")).activities??[]; }
   async walletProfits(chain:Chain,wallets:string[],period:"7d"|"30d"|"all"):Promise<Json[]> { return (await this.run("portfolio","profits","--chain",chain,...wallets.flatMap(wallet=>["--wallet",wallet]),"--period",period)).list??[]; }
   async walletStats(chain:Chain,wallet:string):Promise<Json> { return this.run("portfolio","stats","--chain",chain,"--wallet",wallet,"--period","30d"); }
   async trending(chain:Chain,filters:string[],limit=30):Promise<Json[]> {
@@ -93,5 +100,8 @@ export class GmgnClient {
   async tokenPool(chain: Chain, address: string) { return this.run("token", "pool", "--chain", chain, "--address", address); }
   async tokenHolders(chain:Chain,address:string,limit=5):Promise<Json[]> {
     return (await this.run("token","holders","--chain",chain,"--address",address,"--limit",String(limit),"--order-by","amount_percentage","--direction","desc")).list??[];
+  }
+  async tokenTraders(chain:Chain,address:string,limit=100):Promise<Json[]> {
+    return (await this.run("token","traders","--chain",chain,"--address",address,"--limit",String(limit),"--order-by","profit","--direction","desc")).list??[];
   }
 }

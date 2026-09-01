@@ -21,6 +21,11 @@ test("EVM honeypot is rejected",()=>{
   assert.equal(scoreToken(info,security,{liquidity:"150000"},{median_entry_price_usd:.001,max_price_chase_ratio:.15},base.token).passed,false);
 });
 
+test("mature CALL gate permits cabal concentration within the configured limits",()=>{
+  const base=configForChain(loadConfig(),"base"),info={price:{price:"0.001",volume_5m:"80000"},circulating_supply:"1000000000",holder_count:150,stat:{top_10_holder_rate:"0.5",dev_team_hold_rate:"0.3",top_bundler_trader_percentage:"0.02",bot_degen_rate:"0.03",top_rat_trader_percentage:"0.01",top_entrapment_trader_percentage:"0.02"}},security={is_honeypot:false,is_blacklist:false,can_not_sell:false,is_open_source:true,is_renounced:true,buy_tax:"0",sell_tax:"0",top_10_holder_rate:"0.5",dev_team_hold_rate:"0.3",lock_summary:{is_locked:true}};
+  assert.equal(scoreToken(info,security,{liquidity:"150000"},{median_entry_price_usd:.001,max_price_chase_ratio:.15},base.token).passed,true);
+});
+
 test("tracked-buy safety rejects all-zero holder analytics and thin liquidity",()=>{
   const robinhood=configForChain(loadConfig(),"robinhood"),info={symbol:"memestock",circulating_supply:"1000000000",holder_count:4,liquidity:"803.2153",price:{price:"0.0001804965"},stat:{top_rat_trader_percentage:"0",top_bundler_trader_percentage:"0",top_entrapment_trader_percentage:"0",top_bot_degen_percentage:"0",bot_degen_rate:"0",fresh_wallet_rate:"0",top_10_holder_rate:"0",dev_team_hold_rate:"0",creator_hold_rate:"0",private_vault_hold_rate:"0"},dev:{top_10_holder_rate:"0"}},security={is_honeypot:false,is_blacklist:false,can_not_sell:0,is_open_source:true,is_renounced:true,buy_tax:"0",sell_tax:"0",top_10_holder_rate:"0",lock_summary:{is_locked:true}},verdict=screenTrackedBuyToken(info,security,{liquidity:"803.2153"},robinhood.token);
   assert.equal(verdict.passed,false);
@@ -37,7 +42,9 @@ test("tracked-buy safety accepts a complete liquid non-honeypot",()=>{
 
 test("tracked-buy safety does not apply mature CALL thresholds to early tokens",()=>{
   const cfg=configForChain(loadConfig(),"robinhood").token,security={is_honeypot:false,is_blacklist:false,can_not_sell:0,is_open_source:true,is_renounced:true,buy_tax:"0",sell_tax:"0",top_10_holder_rate:"0.2",lock_summary:{is_locked:true}},token=(symbol:string,marketCap:number,liquidity:number,holders:number)=>({info:{symbol,circulating_supply:"1000000",holder_count:holders,price:{price:String(marketCap/1_000_000)},stat:{top_10_holder_rate:"0.2",fresh_wallet_rate:"0.1"}},pool:{liquidity:String(liquidity)}});
-  for(const [symbol,marketCap,liquidity,holders] of [["DTF",1_500_000,56_700,500],["Motion",80_293,26_073,500],["CHUD",9_290,7_048,147],["VOIDMINER",3_504,533,300]] as const){const row=token(symbol,marketCap,liquidity,holders);assert.equal(screenTrackedBuyToken(row.info,security,row.pool,cfg).passed,true,`${symbol} should remain observable`);}
+  for(const [symbol,marketCap,liquidity,holders] of [["DTF",1_500_000,56_700,500],["Motion",80_293,26_073,500],["CHUD",9_290,7_048,147]] as const){const row=token(symbol,marketCap,liquidity,holders);assert.equal(screenTrackedBuyToken(row.info,security,row.pool,cfg).passed,true,`${symbol} should remain observable`);}
+  const belowFloor=token("VOIDMINER",3_504,533,300);assert.equal(screenTrackedBuyToken(belowFloor.info,security,belowFloor.pool,cfg).passed,false);
+  const contradictory=token("BROKEN",5_000,100_000,300);assert.equal(screenTrackedBuyToken(contradictory.info,security,contradictory.pool,cfg).passed,false);
 });
 
 test("each chain uses its own database",()=>{

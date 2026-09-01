@@ -37,39 +37,32 @@ Fomo stores a broad `tracked_wallets` research report, but the runtime admits on
 
 The system has two loops sharing MongoDB.
 
-### Daily wallet-research loop
+### Independent daily wallet-research jobs
 
-Run locally once every 24 hours:
+Fomo and GMGN run as separate processes and have separate schedules, logs, reports, and failure domains:
 
 ```bash
-npm run sync:wallets:local
+npm run sync:fomo-wallets:local
+npm run scan:gmgn-wallets
 ```
 
-It performs the following work:
-
-1. Opens the dedicated local Fomo Chrome profile.
-2. Captures a fresh short-lived Fomo bearer from authenticated browser traffic.
-3. Scans GMGN runners and extracts their top traders.
-4. Scans Fomo leaderboards, most-held tokens, trending tokens, holders, and trade samples.
-5. Re-evaluates wallet profitability and behavior.
-6. Writes GMGN and Fomo roster documents to MongoDB.
-7. Leaves detailed local JSON/CSV reports under the gitignored `reports/` directory.
+The Fomo job opens the dedicated local Chrome profile, captures a short-lived bearer and the official mixed-chain trending/most-held responses, scans Fomo leaderboards and holder/trade samples, then writes only the Fomo roster. The GMGN job independently scans GMGN runners and their top traders, then writes only the GMGN roster. Both leave detailed local reports under the gitignored `reports/` directory.
 
 The hosted NestJS process reloads MongoDB roster changes every `MONGO_ROSTER_RELOAD_MS`, five minutes by default.
 
 ### Continuous token-signal loop
 
-The NestJS scanner starts immediately and repeats every `SCAN_INTERVAL_MS`, five minutes by default:
+The NestJS scanner starts immediately and repeats every `SCAN_INTERVAL_MS`, five minutes by default. All collection and delivery is ordered Robinhood, BSC, then Solana:
 
 1. Pull GMGN 5-minute trending rankings and market signals.
 2. Pull supported Smart Money, KOL, and followed-wallet activity.
-3. Rotate through the `elite_observed` and `qualified` wallet roster without scanning every wallet in one burst.
+3. Rotate through the `elite_observed` and `qualified` wallet roster using chain-specific budgets (Robinhood 12, BSC 8, Solana 5 by default), retaining both buys and sells.
 4. Optionally pull Fomo discovery and Fomo-native recent swaps when a valid bearer is available.
 5. Pull Robinhood Pons active launches and recent graduations.
 6. Build token candidates and combine independent evidence.
 7. Run market and contract gates on the strongest candidates.
-8. Deduplicate and publish eligible Telegram/SSE alerts.
-9. Maintain two-hour price baselines and announce new whole-number multiples.
+8. Publish tracked-wallet activity, trending tokens, confirmed surge events, and serious-potential runners as separate feeds, in that order.
+9. Deduplicate eligible Telegram/SSE alerts and maintain two-hour price baselines for whole-number multiple updates.
 
 MongoDB stores subscriptions, admins, roster state, alerts, price samples, metric samples, and multiplier baselines. Local browser state, bearer files, generated reports, and `.env` secrets never belong in Git.
 
@@ -400,10 +393,11 @@ Additional controls include:
 ### Daily local research
 
 ```bash
-npm run sync:wallets:local
+npm run sync:fomo-wallets:local
+npm run scan:gmgn-wallets
 ```
 
-The machine must be awake with a logged-in desktop session. Verify the resulting counts and inspect the generated report rather than assuming a zero-row scan succeeded.
+These are separate processes and should be separate LaunchAgents/crons with separate logs. Fomo runs at 03:15 and GMGN at 03:30 in the supplied templates; neither waits for or invokes the other. The machine must be awake with a logged-in desktop session for the Fomo process. Verify each resulting report independently rather than assuming a zero-row scan succeeded.
 
 ### Continuous hosted process
 
@@ -411,12 +405,13 @@ The machine must be awake with a logged-in desktop session. Verify the resulting
 npm start
 ```
 
-Use one Railway replica, MongoDB Atlas, `FOMO_BROWSER_SESSION=false`, and `DAILY_WALLET_REFRESH_ENABLED=false`. Leave Railway Serverless disabled. Keep `FOMO_BROWSER_SESSION=false` in the normal local bot process too: `npm run sync:wallets:local` enables the browser bridge only for the daily sync and closes it afterward.
+Use one Railway replica, MongoDB Atlas, `FOMO_BROWSER_SESSION=false`, and `DAILY_WALLET_REFRESH_ENABLED=false`. Leave Railway Serverless disabled. On the local always-on bot, set `FOMO_BROWSER_SESSION=true` only when continuous Fomo-native swap monitoring is required; the dedicated signed-in Chrome profile then renews the short-lived bearer. If only daily roster refresh is needed, leave it `false` and let `npm run sync:fomo-wallets:local` attach to Chrome for the refresh and close afterward.
 
 ### Manual checks
 
 ```bash
 npm run scan:daily-wallets
+npm run scan:gmgn-wallets
 npm run scan:fomo-wallets
 npm run scan:signals
 npm test

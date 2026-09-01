@@ -21,6 +21,18 @@ test("call baselines persist for two hours and are not reset by rediscovery",()=
   store.close();
 });
 
+test("catastrophic market-cap collapse is suppressed, confirmed, and permanently quarantined",()=>{
+  const store=new TrackerStore(":memory:");
+  assert.equal(store.trackCall(address,"RUG","DEGEN",1,100_000,1_000,7_200,200,86_400),true);
+  assert.equal(store.observeCatastrophicMarketCapCollapse(address,999,.01,1_100,2,15),"suspected");
+  assert.equal(store.observeCatastrophicMarketCapCollapse(address,999,.01,1_100,2,15),"suspected");
+  assert.equal(store.observeCatastrophicMarketCapCollapse(address,999,.01,1_115,2,15),"dead");
+  assert.equal(store.activeCallPerformance(1_116).length,0);
+  assert.equal(store.trackCall(address,"RUG","DEGEN",10,10_000,100_000,7_200,200,86_400),false);
+  assert.equal(store.callPerformance(address)?.dead_at,1_115);
+  store.close();
+});
+
 test("GMGN trigger hits cause exact price and safety rescans at each new multiple",async()=>{
   let currentPrice=2.2,currentMc=220,signalCalls=0;
   const gmgn={
@@ -84,4 +96,22 @@ test("scanner publishes and acknowledges a multiplier only after Telegram delive
 test("scanner delivers completed trending results when a later GMGN call starts cooldown",async()=>{
   let cooldown=0,trendingDeliveries=0,acknowledged=0;const row:any={chain:"sol",address,symbol:"TREND"},tracker:any={gmgn:{get cooldownUntil(){return cooldown;}},scan:async()=>{cooldown=Date.now()+30_000;return [];},latestTrendingAcross:async()=>[row],diagnostics:()=>({}),acknowledgeTrending:()=>{acknowledged++;}},runtime:any={scheduledChains:["sol"],tracker,botStore:{subscriptionCount:()=>1}},telegram:any={enabled:true,alert:async()=>({attempted:0,sent:0,failed:0}),trending:async()=>{trendingDeliveries++;return {attempted:1,sent:1,failed:0};},degen:async()=>({attempted:0,sent:0,failed:0})},stream:any={publishAlert:()=>{},publishScan:()=>{}},scanner=new ScannerService(runtime,telegram,stream,{} as any);
   (scanner as any).saveScanStatus=()=>{};await scanner.scanAndPublish();assert.equal(trendingDeliveries,1);assert.equal(acknowledged,1);
+});
+
+test("multiplier monitoring sends no requests while the shared GMGN cooldown is active",async()=>{
+  let requests=0;
+  const gmgn={cooldownUntil:Date.now()+30_000,tokenInfo:async()=>{requests++;return {};},marketSignals:async()=>{requests++;return [];}},service=new TrackerService({default_chain:"robinhood",enabled_chains:["robinhood","bsc","sol"]} as any,gmgn as any);
+  for(const chain of ["robinhood","bsc","sol"] as const)service.store(chain).trackCall(address,"TEST","DEGEN",1,100,1_000);
+  assert.deepEqual(await service.monitorCallMultiples(["robinhood","bsc","sol"],[],1_100),[]);
+  assert.deepEqual(await service.monitorTriggeredCallMultiples(["robinhood","bsc","sol"],1_100),[]);
+  assert.equal(requests,0);
+});
+
+test("scanner shutdown stops scheduling, closes Fomo, and rejects new scan work",async()=>{
+  let scans=0,closed=0;
+  const deleted:string[]=[],runtime:any={scheduledChains:["robinhood"],tracker:{gmgn:{cooldownUntil:0},scan:async()=>{scans++;return [];}},botStore:{subscriptionCount:()=>0}},telegram:any={},stream:any={},scheduler:any={deleteInterval:(name:string)=>deleted.push(name)},scanner=new ScannerService(runtime,telegram,stream,scheduler);
+  (scanner as any).fomoSession={connected:true,close:async()=>{closed++;}};
+  await scanner.onApplicationShutdown();
+  await scanner.scanAndPublish();
+  assert.equal(scans,0);assert.equal(closed,1);assert.ok(deleted.includes("fomo-session-health"));
 });

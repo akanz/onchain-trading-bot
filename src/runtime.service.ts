@@ -7,6 +7,9 @@ import { initializeMongo, type MongoState } from "./mongo.js";
 import { TrackerService } from "./service.js";
 import { BotStore } from "./store.js";
 import type { Chain, TrackerConfig } from "./types.js";
+import { priorityChains } from "./chain-priority.js";
+
+const sleep=(milliseconds:number)=>new Promise(resolve=>setTimeout(resolve,milliseconds));
 
 @Injectable()
 export class RuntimeService implements OnModuleInit,OnModuleDestroy {
@@ -18,8 +21,8 @@ export class RuntimeService implements OnModuleInit,OnModuleDestroy {
   constructor(@InjectConnection() private readonly connection:Connection) {}
 
   get scheduledChains():Chain[]{
-    const names=new Set((process.env.SCHEDULED_CHAINS??"sol,bsc,robinhood").split(",").map(value=>value.trim().toLowerCase()).filter(Boolean));
-    return this.config.enabled_chains.filter(chain=>names.has(chain));
+    const names=new Set((process.env.SCHEDULED_CHAINS??"robinhood,bsc,sol").split(",").map(value=>value.trim().toLowerCase()).filter(Boolean));
+    return priorityChains(this.config.enabled_chains.filter(chain=>names.has(chain)));
   }
 
   async onModuleInit():Promise<void>{
@@ -32,6 +35,6 @@ export class RuntimeService implements OnModuleInit,OnModuleDestroy {
   }
 
   async onModuleDestroy():Promise<void>{
-    await Promise.all([this.tracker?.close(),this.botStore?.close()]);
+    await Promise.race([Promise.all([this.tracker?.close(),this.botStore?.close()]),sleep(1500)]);
   }
 }

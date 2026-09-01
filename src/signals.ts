@@ -7,6 +7,7 @@ export type SignalSource =
   | "trending_early_volume"
   | "trending_multiwindow_stability"
   | "price_surge"
+  | "profitable_surge_wallet"
   | "smart_money_signal"
   | "smart_money_wallet"
   | "kol_wallet"
@@ -27,10 +28,14 @@ export interface SignalCandidate {
   sourceIds: Set<string>;
   wallets: Set<string>;
   buyWallets: Set<string>;
+  sellWallets?: Set<string>;
   traderLabels?: Set<string>;
+  sellTraderLabels?: Set<string>;
+  sellSources?: Set<SignalSource>;
   twitterAccounts: Set<string>;
   firstTimestamp: number;
   aggregateBuyUsd: number;
+  aggregateSellUsd?: number;
   observedMarketCap?: number;
   marketCapObservedAt?: number;
   market?: Json;
@@ -38,6 +43,7 @@ export interface SignalCandidate {
   tokenSecurity?: Json;
   tokenPool?: Json;
   trackedBuySafety?: Json;
+  surgeAttribution?: Json;
 }
 
 const finite = (value: unknown): number | null => {
@@ -90,6 +96,16 @@ export function passesMarketGate(row:Json,cfg:Json):{passed:boolean;reasons:stri
   return {passed:reasons.length===0,reasons};
 }
 
+export function passesSurgeDiscoveryGate(row:Json,cfg:Json):{passed:boolean;reasons:string[]} {
+  const m=marketSnapshot(row),reasons:string[]=[],required=(ok:boolean,label:string)=>{if(!ok)reasons.push(label);},liquidity=finite(m.liquidity),marketCap=finite(m.market_cap),holders=finite(m.holder_count),top10=finite(m.top_10_holder_rate),rug=finite(m.rug_ratio),minLiquidity=finite(cfg.tracked_alert_min_liquidity_usd)??500,minRatio=finite(cfg.tracked_alert_min_liquidity_to_market_cap_ratio)??.01,maxRatio=finite(cfg.tracked_alert_max_liquidity_to_market_cap_ratio)??10,minMarketCap=finite(cfg.tracked_alert_min_market_cap_usd)??5000,minHolders=finite(cfg.tracked_alert_min_holders)??10,maxTop10=finite(cfg.tracked_alert_max_top_10_holder_rate)??finite(cfg.max_top_10_holder_rate)??.3,ratio=liquidity!==null&&marketCap!==null&&marketCap>0?liquidity/marketCap:null;
+  required(liquidity!==null&&liquidity>=minLiquidity,`liquidity below early-token floor $${minLiquidity}`);required(marketCap!==null&&marketCap>=minMarketCap&&marketCap<=cfg.max_market_cap_usd,`market cap unavailable or outside early-token range $${minMarketCap}-$${cfg.max_market_cap_usd}`);required(ratio!==null&&ratio>=minRatio,`liquidity-to-market-cap ratio below ${(minRatio*100).toFixed(1)}%`);required(ratio!==null&&ratio<=maxRatio,`liquidity-to-market-cap ratio above ${(maxRatio*100).toFixed(1)}%; market data is contradictory`);required(holders!==null&&holders>=minHolders,`fewer than ${minHolders} holders`);required(top10!==null&&top10>0&&top10<=maxTop10,"top-10 concentration is 0%, too high, or unavailable");required(rug===null||rug<=.3,"rug ratio above 0.30");required(!truthyFlag(m.is_wash_trading),"wash trading detected");required(!truthyFlag(m.is_honeypot),"honeypot detected");return {passed:reasons.length===0,reasons};
+}
+
+export function isCatastrophicMarketCapCollapse(baseline:unknown,current:unknown,ratio=.01):boolean {
+  const baselineMarketCap=finite(baseline),currentMarketCap=finite(current),threshold=finite(ratio);
+  return baselineMarketCap!==null&&baselineMarketCap>0&&currentMarketCap!==null&&currentMarketCap>=0&&threshold!==null&&threshold>0&&currentMarketCap<baselineMarketCap*threshold;
+}
+
 export function signalStrength(candidate:SignalCandidate):number {
   let score=0;
   if(candidate.sources.has("trending_smart_money"))score+=2;
@@ -97,6 +113,7 @@ export function signalStrength(candidate:SignalCandidate):number {
   if(candidate.sources.has("trending_multiwindow_stability"))score+=2;
   if(candidate.sources.has("smart_money_signal"))score+=2;
   if(candidate.sources.has("price_surge"))score+=1;
+  if(candidate.sources.has("profitable_surge_wallet"))score+=3;
   if(candidate.sources.has("trending_momentum"))score+=1;
   if(candidate.sources.has("trending_small_cap"))score+=1;
   if(candidate.sources.has("twitter"))score+=1;
@@ -113,7 +130,7 @@ export function signalStrength(candidate:SignalCandidate):number {
 }
 
 export function hasCapitalConfirmation(candidate:SignalCandidate):boolean {
-  return ["trending_multiwindow_stability","trending_smart_money","smart_money_signal","smart_money_wallet","kol_wallet","followed_wallet","tracked_wallet","fomo_holder","fomo_leaderboard","fomo_tracked_wallet"].some(source=>candidate.sources.has(source as SignalSource));
+  return ["trending_multiwindow_stability","trending_smart_money","smart_money_signal","profitable_surge_wallet","smart_money_wallet","kol_wallet","followed_wallet","tracked_wallet","fomo_holder","fomo_leaderboard","fomo_tracked_wallet"].some(source=>candidate.sources.has(source as SignalSource));
 }
 
 export function shouldInvestigate(candidate:SignalCandidate,minStrength=3):boolean {

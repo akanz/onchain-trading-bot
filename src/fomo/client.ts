@@ -2,6 +2,7 @@ import type { Chain, Json } from "../types.js";
 import { join } from "node:path";
 import { DATA_ROOT } from "../config.js";
 import { selectFomoToken, tokenExpiry } from "./token-store.js";
+import { mergeFomoDiscoveryRows, readFomoDiscoverySnapshot } from "./discovery-store.js";
 
 export interface FomoToken extends Json {
   address:string;
@@ -21,6 +22,12 @@ export interface FomoLeaderboards {byPeriod:Record<FomoLeaderboardPeriod,Json[]>
 
 const NETWORK_CHAINS:Record<number,Chain|undefined>={1399811149:"sol",56:"bsc",8453:"base",4663:"robinhood",1:"eth"};
 export const fomoChain=(networkId:unknown)=>NETWORK_CHAINS[Number(networkId)];
+export function fomoSwapLegs(swap:Json):Json[]{
+  const legs:Json[]=[];
+  if(swap.outTradeId)legs.push({side:"buy",trade_id:swap.outTradeId,networkId:swap.outNetworkId??swap.networkId,tokenAddress:swap.outTokenAddress,amount_usd:Number(swap.humanUsdAmountOut??swap.humanUsdAmountIn??0)});
+  if(swap.inTradeId)legs.push({side:"sell",trade_id:swap.inTradeId,networkId:swap.inNetworkId??swap.networkId,tokenAddress:swap.inTokenAddress,amount_usd:Number(swap.humanUsdAmountIn??swap.humanUsdAmountOut??0)});
+  return legs;
+}
 const finite=(value:unknown)=>{const n=Number(value);return Number.isFinite(n)?n:0;};
 const sleep=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
 const transient=(error:unknown)=>/ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|ECONNREFUSED|fetch failed|socket hang up|SocketError|other side closed|bad record mac/i.test(String(error));
@@ -28,6 +35,7 @@ const transient=(error:unknown)=>/ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|ECONN
 export class FomoClient {
   readonly baseUrl=process.env.FOMO_BASE_URL??"https://prod-api.fomo.family";
   readonly tokenFile=process.env.FOMO_TOKEN_FILE??join(DATA_ROOT,".runtime","fomo-token.json");
+  readonly discoverySnapshotFile=process.env.FOMO_DISCOVERY_SNAPSHOT_FILE??join(DATA_ROOT,".runtime","fomo-discovery.json");
   get token(){return selectFomoToken(process.env.FOMO_TOKEN,this.tokenFile);}
   get enabled(){return Boolean(this.token);}
   get expiresAt():number|null {return tokenExpiry(this.token);}
@@ -41,8 +49,11 @@ export class FomoClient {
     for(let attempt=0;attempt<3;attempt++){try{const response=await fetch(`${this.baseUrl}${path}`,{method,headers:this.headers(),...(body?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(20000)});if(!response.ok){if(attempt<2&&[502,503,504].includes(response.status)){await sleep((attempt+1)*1000);continue;}throw new Error(`Fomo ${method} ${path.split("?")[0]} failed (${response.status})${response.status===401||response.status===430?"; the bearer token may be expired":""}`);}const payload=await response.json();if(payload?.success===false)throw new Error(`Fomo request rejected: ${payload.message??"unknown error"}`);return payload?.responseObject??payload;}catch(error){if(attempt<2&&transient(error)){console.warn(`Fomo transient network failure; retrying in ${attempt+1}s`);await sleep((attempt+1)*1000);continue;}throw error;}}
     throw new Error("Fomo request exhausted transient-network retries");
   }
-  mostHeld():Promise<Json[]>{return this.request("/proxy/mostHeld","POST",{});}
-  trending():Promise<Json[]>{return this.request("/proxy/trendingTokens","POST",{});}
+  // These proxy routes distinguish an absent body from an empty JSON object.
+  // Fomo's web client sends no body; `{}` currently returns a Solana-only
+  // subset and silently drops Robinhood/BSC/Base/Ethereum discovery rows.
+  async mostHeld():Promise<Json[]>{const rows=await this.request("/proxy/mostHeld","POST");return mergeFomoDiscoveryRows(rows,readFomoDiscoverySnapshot(this.discoverySnapshotFile)?.most_held??[]);}
+  async trending():Promise<Json[]>{const rows=await this.request("/proxy/trendingTokens","POST");return mergeFomoDiscoveryRows(rows,readFomoDiscoverySnapshot(this.discoverySnapshotFile)?.trending??[]);}
   async leaderboard(period:FomoLeaderboardPeriod):Promise<Json[]>{const data=await this.request(`/v2/leaderboard/${period}`);return data?.leaderboard??[];}
   async leaderboards(periods:FomoLeaderboardPeriod[]=["24h","7d","30d"]):Promise<FomoLeaderboards>{
     const responses=await Promise.all(periods.map(async period=>[period,await this.leaderboard(period)] as const)),byPeriod={"24h":[],"7d":[],"30d":[]} as Record<FomoLeaderboardPeriod,Json[]>,profiles=new Map<string,Json>();

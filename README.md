@@ -6,9 +6,8 @@ This is a conservative GMGN research/alert engine for Solana, BSC, Base, and GMG
 
 ## Documentation
 
-- [Complete system guide](docs/SYSTEM_GUIDE.md): architecture, wallet admission, Fomo and GMGN research, runner analysis, early-token discovery, price surges, safety gates, alerts, and operations.
-- [Fomo API research guide](fomo/README.md): authenticated endpoints, mixed-chain normalization, leaderboard/holder analysis, trade samples, and browser-session renewal.
-- [Fomo endpoint catalog](fomo/endpoints.json): machine-readable request inventory.
+- [Complete system guide](docs/SYSTEM_GUIDE.md): architecture, wallet admission, GMGN research, runner analysis, early-token discovery, price surges, safety gates, alerts, and operations.
+- The files under [`fomo/`](fomo/README.md) are retained only as historical research; they are not called or loaded by the application.
 
 The continuous pipeline is deliberately layered:
 
@@ -41,13 +40,17 @@ npm run dev
 
 Set `MONGODB_URI`, `TELEGRAM_BOT_TOKEN`, and your numeric Telegram user ID in `TELEGRAM_ADMIN_USER_IDS`. Add `TWITTER_TOKEN` from [6551/OpenTwitter](https://6551.io/mcp) to enable X context. If the Twitter token is absent, the on-chain scanner still runs. Locally, GMGN credentials may remain in `~/.config/gmgn/.env`; on a hosting provider, add `GMGN_API_KEY` and the API request-signing `GMGN_PRIVATE_KEY` as secret environment variables. Never commit either key.
 
-Only one process may poll Telegram commands. If Railway is the command-polling instance and a local process runs the Fomo browser bridge, set `TELEGRAM_POLLING_ENABLED=false` locally. The local scanner will still send alerts; it simply will not compete with Railway for `getUpdates`.
+Only one process may poll Telegram commands. If Railway is the command-polling instance and a local scanner also runs, set `TELEGRAM_POLLING_ENABLED=false` locally. The local scanner will still send alerts; it simply will not compete with Railway for `getUpdates`.
+
+Background GMGN access is also single-owner. Instances sharing MongoDB compete for a renewable `gmgn-background-scanner` lease; only its current owner performs wallet, discovery, and multiplier requests. Other Railway or local instances stay in standby while retaining Telegram delivery and cached/API reads. GMGN calls are spaced by at least five seconds with no burst above five weighted units, and a returned cooldown is persisted with a ten-second buffer. Set `GMGN_DISTRIBUTED_LEASE_ENABLED=false` only when an instance uses a genuinely separate GMGN account.
+
+The one-shot signal scan and both GMGN wallet-roster jobs use the same lease. If the always-on bot owns it, those commands defer their GMGN phase instead of competing with production or retrying through a `429` cooldown.
 
 The default X watch list is `elonmusk,WhiteHouse,realDonaldTrump,cz_binance`; change `TWITTER_ACCOUNTS` to a comma-separated list. Only explicit contract addresses in recent posts are associated with candidates, and an X mention is never sufficient to send a token.
 
-Fomo discovery lives in [`fomo/`](fomo/README.md). `npm run scan:fomo-wallets` merges the 24h, 7d, and 30d leaderboards with most-held and trending-token holders. Every public leaderboard profile remains available for research. Live monitoring admits profiles with at least 500% total, realized, or unrealized position ROI and elite leaderboard traders with at least `FOMO_ELITE_MIN_LEADERBOARD_PNL_USD` profit (default $100K), even when a narrow recent closed-trade sample fails. A retrace below $1m does not remove its wallets from the research universe. Passing the repeatability gates upgrades a wallet to `qualified`; it is no longer a prerequisite for monitoring. The browser-session bridge keeps the short-lived Fomo bearer current without storing Google credentials.
+Fomo tracking has been removed from the application. The service does not open a Fomo browser session, read a Fomo bearer, call Fomo APIs, run a Fomo refresh job, or admit Fomo-sourced wallets from local reports, seeds, or MongoDB. The old Fomo research files remain in the repository only as historical data and are not part of the runtime pipeline.
 
-The gitignored local `tracked-wallet-seeds.json` can hold a contract-specific research roster. Generated rosters use three distinct states: broad `observed` research rows, monitored `elite_observed` wallets with auditable high-return or elite-profit evidence, and repeatability-validated `qualified` wallets. Both monitored tiers are polled; qualification changes confidence metadata, not whether the wallet disappears. GMGN entries are polled through GMGN on-chain wallet activity in rotating batches, while Fomo entries retain their public Fomo user ID and can use Fomo's native user-swap feed because Fomo profile addresses often do not appear in GMGN. Generated daily rosters remain separate and continue to refresh normally; MongoDB remains the deployed source of truth.
+The gitignored local `tracked-wallet-seeds.json` can hold a contract-specific research roster. Generated GMGN rosters use three distinct states: broad `observed` research rows, monitored `elite_observed` wallets with auditable high-return evidence, and repeatability-validated `qualified` wallets. Monitored GMGN entries are polled through on-chain wallet activity in rotating batches; MongoDB remains the deployed source of truth.
 
 Robinhood degen discovery also reads Pons' public active-launch and graduated catalogs every five minutes. It snapshots price and bonding-curve progress locally, then labels new active launches, near-graduation launches, just-graduated tokens, 5m/30m price surges, and 30m progress surges. A capped set receives GMGN K-line confirmation so Pons discovery does not consume the GMGN rate-limit budget unchecked. The top-20 degen digest reserves 75% of its available slots for Robinhood when enough Robinhood candidates exist. Ranked Pons candidates are rendered as individual cards enriched with GMGN market activity and top-holder data, plus Pons, chart, explorer, social, GMGN, Axiom, and direct third-party trading-bot links. Bot links contain no borrowed referral IDs and never submit a trade. Pons names and symbols are escaped display metadata only; they are never treated as instructions or as evidence that a contract is safe.
 
@@ -87,12 +90,12 @@ Fresh price-surge candidates also receive a bounded wallet-attribution pass. The
 
 Tracked-wallet observations use a dedicated early-token risk gate, not the mature CALL thresholds. They require at least $500 real liquidity, at least 1% liquidity relative to market cap, 10 holders, populated/non-zero holder analysis, acceptable top-10 concentration, and clean contract, sellability, tax, and liquidity-lock checks. The stricter $50K liquidity, $100K market cap, and 300-holder thresholds remain requirements for CALL-quality promotion only.
 
-Every tracked-wallet buy or sell in the lookback window is considered for an immediate activity notice whether or not it appears in trending, most-held, or a surge feed. A dedicated one-minute monitor runs independently of the heavier discovery scan and receives the GMGN request budget first; this prevents trending, K-line, or surge-attribution calls from starving wallet activity. Before delivery, the contract must pass the same fail-closed safety screen described above; failed or unavailable checks are recorded and are not sent to chat. `/suppressed [chain|all]` shows the retained market, holder, contract-safety, pool, and tracked-buyer details for blocked tokens without promoting them as signals. One distinct buyer is labelled `OBSERVE`, two are `POTENTIAL`, and three or more are `BUY SIGNAL`; sells are labelled `SELL WATCH` because the feed may represent either a reduction or a full exit. Each notice names the tracked Fomo handle when available, shows observed size, and records a GMGN market-cap quote at detection because the Fomo swap endpoint itself does not return market cap. Confidence upgrades have separate deduplication keys, so an earlier `OBSERVE` cooldown cannot suppress a later `POTENTIAL` or `BUY SIGNAL`. Activity notices are delivered first, followed by trending, surged, and serious-potential feeds, in Robinhood/BSC/Solana order. Fomo activity polling continues during a GMGN cooldown, but delivery waits until GMGN contract, holder, and liquidity checks are available and pass. GMGN fallback polling uses independent rotating budgets—6 Robinhood, 4 BSC, and 2 Solana wallets per minute by default—so the higher-volume chains receive more coverage without permanently excluding the rest of each roster. `/trackstatus` exposes roster coverage, per-chain polling health, Fomo profile errors, recent buys and sells, and safety-suppression reasons. New `/start` users and non-bot members joining a group receive an explanation of these alert types and their safety meaning. Token cards and digests use friendly contextual emoji; `⚠️` is reserved for explicit rug evidence such as a detected honeypot, rug/scam flag, malicious contract, or sellability failure. New `CALL` and `RESEARCH` results are sent to Telegram chats that ran `/start` or `/subscribe`, and streamed to web clients over SSE:
+Every tracked-wallet buy or sell in the lookback window is considered for an immediate activity notice whether or not it appears in trending or a surge feed. A dedicated one-minute monitor runs independently of the heavier discovery scan and receives the GMGN request budget first. Before delivery, the contract must pass the same fail-closed safety screen described above; failed or unavailable checks are recorded and are not sent to chat. `/suppressed [chain|all]` shows the retained market, holder, contract-safety, pool, and tracked-buyer details for blocked tokens without promoting them as signals. One distinct buyer is labelled `OBSERVE`, two are `POTENTIAL`, and three or more are `BUY SIGNAL`; sells are labelled `SELL WATCH`. Confidence upgrades have separate deduplication keys, so an earlier `OBSERVE` cooldown cannot suppress a later `POTENTIAL` or `BUY SIGNAL`. Activity notices are delivered first, followed by trending, surged, and serious-potential feeds, in Robinhood/BSC/Solana order. GMGN polling uses independent rotating budgets—6 Robinhood, 4 BSC, and 2 Solana wallets per minute by default—so the higher-volume chains receive more coverage without permanently excluding the rest of each roster. While GMGN is cooling down, every GMGN-dependent monitor remains idle and preserves its cached state. `/trackstatus` exposes roster coverage, per-chain polling health, and safety-suppression reasons. New `/start` users and non-bot members joining a group receive an explanation of these alert types and their safety meaning. Token cards and digests use friendly contextual emoji; `⚠️` is reserved for explicit rug evidence such as a detected honeypot, rug/scam flag, malicious contract, or sellability failure. New `CALL` and `RESEARCH` results are sent to Telegram chats that ran `/start` or `/subscribe`, and streamed to web clients over SSE:
 
 ```js
 const events = new EventSource("http://127.0.0.1:3000/api/stream");
-events.addEventListener("alert", event => console.log(JSON.parse(event.data)));
-events.addEventListener("scan", event => console.log(JSON.parse(event.data)));
+events.addEventListener("alert", (event) => console.log(JSON.parse(event.data)));
+events.addEventListener("scan", (event) => console.log(JSON.parse(event.data)));
 ```
 
 You can run the same pipeline once, without starting the web server or Telegram polling loop:
@@ -101,23 +104,21 @@ You can run the same pipeline once, without starting the web server or Telegram 
 npm run scan:signals
 ```
 
-Rebuild the Fomo and GMGN wallet rosters as independent jobs. The Fomo process attaches to the dedicated Chrome profile, captures a fresh bearer plus Fomo's full mixed-chain discovery response, extracts Fomo traders, writes its MongoDB roster, and exits without waiting for GMGN. With `FOMO_GMGN_VALIDATION=false` it consumes no GMGN quota. The GMGN process has no browser or Fomo dependency:
+Rebuild the GMGN wallet roster with:
 
 ```bash
-npm run sync:fomo-wallets:local
 npm run scan:gmgn-wallets
 ```
 
-Log into Fomo once in the Chrome window created by the Fomo command. The dedicated profile retains the login locally; Google credentials and the captured bearer are never committed. Schedule the two processes independently, with distinct logs, so a long GMGN scan or cooldown cannot delay Fomo extraction:
+`runner-contracts.json` is the durable user-confirmed runner cohort. Run `npm run scan:runner-wallets` to open each contract's main DexScreener pair in ordinary Chrome, scrape its 30-day Top Traders table, and retain wallets whose bought/sold/current-value cash flows imply at least 500% position ROI. Zero-cost rows are rejected because their percentage return cannot be established. If DexScreener has no pair or does not return a trader table, the job uses GMGN top traders only for that missing token. GMGN also performs the wallet-wide 30-day/all-time 200% quality check and ongoing buy/sell monitoring. The scan is resumable through an ignored cache, writes a JSON report rather than CSV, and upserts the wallets under a separate `dexscreener` source so the daily GMGN roster replacement cannot delete them. GMGN fallback and wallet-profit requests are spaced by 35 seconds; set `GMGN_RUNNER_SCAN_REQUEST_INTERVAL_MS` higher if the account shares quota with another deployment.
+
+To schedule the refresh separately from the always-on process:
 
 ```cron
-15 3 * * * cd /Users/akanz/projects/trenches/trading_bot && /Users/akanz/.nvm/versions/node/v24.3.0/bin/npm run sync:fomo-wallets:local >> fomo-wallet-scan-cron.log 2>&1
 30 3 * * * cd /Users/akanz/projects/trenches/trading_bot && /Users/akanz/.nvm/versions/node/v24.3.0/bin/npm run scan:gmgn-wallets >> gmgn-wallet-scan-cron.log 2>&1
 ```
 
-Set `DAILY_WALLET_REFRESH_ENABLED=false` wherever these LaunchAgents/crons are installed so the in-process scheduler does not duplicate the same refresh. The hosted process reloads the MongoDB roster every `MONGO_ROSTER_RELOAD_MS` (five minutes by default), so either job's update becomes active without a restart. The Mac must be awake with a logged-in desktop session when Chrome starts; check `fomo-wallet-scan-cron.log` and `gmgn-wallet-scan-cron.log` after the first scheduled runs.
-
-For continuous Fomo-native buy monitoring on the local always-on bot, set `FOMO_BROWSER_SESSION=true`. This keeps the dedicated signed-in Chrome profile attached and renews the short-lived bearer. Leave it `false` on Railway or any host without that local browser session; the independent daily Fomo sync will still refresh the MongoDB roster, but a hosted process without a current bearer cannot see Fomo-native swaps.
+Set `DAILY_WALLET_REFRESH_ENABLED=false` wherever this cron is installed so the in-process scheduler does not duplicate the same refresh. The hosted process reloads the MongoDB roster every `MONGO_ROSTER_RELOAD_MS` (five minutes by default), so the update becomes active without a restart.
 
 Optional one-shot signal cron when `npm run dev` is not running:
 
@@ -129,7 +130,7 @@ Run `/start` in the Telegram bot once before relying on cron delivery. The one-s
 
 ## MongoDB migration and hosting
 
-MongoDB is the durable source of truth for Telegram subscriptions, invite-verified admins, alert deduplication, price/metric samples, multiplier baselines, and the daily GMGN/Fomo tracked-wallet rosters. Generated reports remain local diagnostics and are intentionally excluded from Git.
+MongoDB is the durable source of truth for Telegram subscriptions, invite-verified admins, alert deduplication, price/metric samples, multiplier baselines, and the daily GMGN tracked-wallet roster. Generated reports remain local diagnostics and are intentionally excluded from Git.
 
 To import the existing local SQLite state and current wallet-report JSON files once, put a MongoDB connection string in the ignored `.env` and run:
 
@@ -145,7 +146,7 @@ Railway can run this as one persistent service. Do not create a cron whose purpo
 
 1. Create a Railway project from the GitHub repository.
 2. Set build command `npm ci --include=dev && npm run build`, start command `npm start`, and health-check path `/health`.
-3. Set `HOST=0.0.0.0`, `NODE_ENV=production`, `FOMO_BROWSER_SESSION=false`, `DAILY_WALLET_REFRESH_ENABLED=false`, and the secret variables listed below. Railway injects `PORT`.
+3. Set `HOST=0.0.0.0`, `NODE_ENV=production`, `DAILY_WALLET_REFRESH_ENABLED=false`, and the secret variables listed below. Railway injects `PORT`.
 4. Use MongoDB Atlas and set its URI as `MONGODB_URI`, or add Railway's MongoDB template and reference its private `MONGO_URL`. The application accepts either name.
 5. Keep Serverless disabled and deploy one replica.
 
@@ -159,13 +160,11 @@ Railway variables that must be secrets:
 - `TWITTER_TOKEN`
 - `WEB_API_TOKEN`
 
-`FOMO_TOKEN` is optional on Railway. Leave it unset when Fomo is used only for the local daily roster refresh. In that mode Railway monitors Mongo-synced wallet addresses through GMGN, but it cannot query Fomo-native recent swaps. Set a current bearer on Railway only if continuous Fomo-native swap monitoring is required.
-
 The Railway MongoDB template is self-hosted and unmanaged. MongoDB Atlas is preferable when managed backups and database maintenance matter.
 
 ### Render
 
-`render.yaml` defines the equivalent Render web service and prompts for secrets during Blueprint creation. MongoDB removes the need for a Render persistent disk. Do not use a free sleeping web service for production alerts: a sleeping instance cannot continuously poll Telegram or perform scans on schedule. The Fomo browser-session bridge and built-in roster refresh are disabled in hosted environments; the local daily sync writes refreshed wallets to their shared MongoDB.
+`render.yaml` defines the equivalent Render web service and prompts for secrets during Blueprint creation. MongoDB removes the need for a Render persistent disk. Do not use a free sleeping web service for production alerts: a sleeping instance cannot continuously poll Telegram or perform scans on schedule.
 
 ## Alert semantics
 

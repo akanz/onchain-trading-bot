@@ -11,11 +11,13 @@
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "format": "prettier --write \"{src,scripts,test}/**/*.ts\" \"*.{json,md}\"",
+    "format:check": "prettier --check \"{src,scripts,test}/**/*.ts\" \"*.{json,md}\"",
+    "lint:complexity": "biome lint src",
     "test": "node --import tsx --test test/*.test.ts",
     "scan:daily-wallets": "node --import tsx scripts/daily-wallet-scan.ts",
     "scan:gmgn-wallets": "node --import tsx scripts/daily-wallet-scan.ts",
-    "scan:fomo-wallets": "node --import tsx scripts/fomo-wallet-scan.ts",
-    "sync:fomo-wallets:local": "node --import tsx scripts/local-fomo-sync.ts",
+    "scan:runner-wallets": "node --import tsx scripts/runner-wallet-scan.ts",
     "scan:signals": "node --import tsx src/scan-once.ts",
     "migrate:mongodb": "node --import tsx scripts/migrate-sqlite-to-mongodb.ts"
   },
@@ -35,8 +37,10 @@
     "rxjs": "^7.8.2"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.11",
     "@nestjs/testing": "^12.0.1",
     "@types/node": "^26.4.0",
+    "prettier": "3.6.2",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2"
   },

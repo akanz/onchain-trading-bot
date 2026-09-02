@@ -4,26 +4,247 @@ import { buildDegenRows } from "../src/degen.js";
 import { TrackerService } from "../src/service.js";
 import { loadConfig } from "../src/config.js";
 
-const cfg={min_liquidity_usd:50_000,min_market_cap_usd:100_000,max_market_cap_usd:20_000_000,min_holders:300,max_top_10_holder_rate:.3,max_bundler_rate:.15,max_rat_trader_rate:.05,max_entrapment_rate:.15,max_dev_team_hold_rate:.1};
-const address=(n:number)=>`0x${String(n).padStart(40,"0")}`;
+const cfg = {
+  min_liquidity_usd: 50_000,
+  min_market_cap_usd: 100_000,
+  max_market_cap_usd: 20_000_000,
+  min_holders: 300,
+  max_top_10_holder_rate: 0.3,
+  max_bundler_rate: 0.15,
+  max_rat_trader_rate: 0.05,
+  max_entrapment_rate: 0.15,
+  max_dev_team_hold_rate: 0.1,
+};
+const address = (n: number) => `0x${String(n).padStart(40, "0")}`;
 
-test("degen rows contain all rejected trending tokens, prioritize microcaps, and add only sub-100k surge events",()=>{
-  const now=2_000_000,trending=[
-    {address:address(1),symbol:"MICRO",market_cap:75_000,liquidity:8_000,volume:30_000,price_change_percent5m:12,quality_passed:false,quality_reasons:["liquidity below $50000"]},
-    {address:address(2),symbol:"PASSED",market_cap:90_000,liquidity:60_000,volume:20_000,quality_passed:true,quality_reasons:[]},
-    {address:address(3),symbol:"LARGE",market_cap:150_000,liquidity:10_000,volume:50_000,quality_passed:false,quality_reasons:["liquidity below $50000"]},
+test("degen rows contain all rejected trending tokens, prioritize microcaps, and add only sub-100k surge events", () => {
+  const now = 2_000_000,
+    trending = [
+      {
+        address: address(1),
+        symbol: "MICRO",
+        market_cap: 75_000,
+        liquidity: 8_000,
+        volume: 30_000,
+        price_change_percent5m: 12,
+        quality_passed: false,
+        quality_reasons: ["liquidity below $50000"],
+      },
+      {
+        address: address(2),
+        symbol: "PASSED",
+        market_cap: 90_000,
+        liquidity: 60_000,
+        volume: 20_000,
+        quality_passed: true,
+        quality_reasons: [],
+      },
+      {
+        address: address(3),
+        symbol: "LARGE",
+        market_cap: 150_000,
+        liquidity: 10_000,
+        volume: 50_000,
+        quality_passed: false,
+        quality_reasons: ["liquidity below $50000"],
+      },
+    ];
+  const signals = [
+    {
+      token_address: address(4),
+      signal_type: 6,
+      trigger_at: now - 30,
+      market_cap: 60_000,
+      cur_data: { liquidity: 20_000, holder_count: 100 },
+      data: {
+        address: address(4),
+        symbol: "SURGE",
+        market_cap: 60_000,
+        volume: 40_000,
+        price_change_percent5m: 80,
+        rug_ratio: 0.2,
+        top_10_holder_rate: 0.2,
+        bundler_rate: 0.1,
+        rat_trader_amount_rate: 0.01,
+        entrapment_ratio: 0.01,
+      },
+    },
   ];
-  const signals=[{token_address:address(4),signal_type:6,trigger_at:now-30,market_cap:60_000,cur_data:{liquidity:20_000,holder_count:100},data:{address:address(4),symbol:"SURGE",market_cap:60_000,volume:40_000,price_change_percent5m:80,rug_ratio:.2,top_10_holder_rate:.2,bundler_rate:.1,rat_trader_amount_rate:.01,entrapment_ratio:.01}}];
-  const rows=buildDegenRows("bsc",trending,signals,cfg,100_000,now);
-  assert.deepEqual(rows.map(row=>row.symbol),["SURGE","MICRO","LARGE"]);
-  assert.equal(rows[2]!.is_microcap,false);
+  const rows = buildDegenRows("bsc", trending, signals, cfg, 100_000, now);
+  assert.deepEqual(
+    rows.map((row) => row.symbol),
+    ["SURGE", "MICRO", "LARGE"],
+  );
+  assert.equal(rows[2]!.is_microcap, false);
   assert.ok(rows[0]!.degen_sources.includes("PRICE SURGE"));
 });
 
-test("cross-chain degen digest is capped to the configured top set",()=>{const service=new TrackerService({enabled_chains:["sol","bsc"],default_chain:"sol"} as any),rows=Array.from({length:30},(_,index)=>({chain:index%2?"bsc":"sol",address:address(index+10),market_cap:index<22?50_000:150_000,is_microcap:index<22,volume:index*1_000,degen_sources:["FILTERED TRENDING"],degen_signal_labels:index%7===0?["PRICE SURGE"]:[]}));(service as any).degenRows.set("sol",rows.filter(row=>row.chain==="sol"));(service as any).degenRows.set("bsc",rows.filter(row=>row.chain==="bsc"));const selected=service.latestDegenAcross(["sol","bsc"],20);assert.equal(selected.length,20);assert.equal(selected.filter(row=>row.market_cap<=100_000).length,20);});
+test("cross-chain degen digest is capped to the configured top set", () => {
+  const service = new TrackerService({
+      enabled_chains: ["sol", "bsc"],
+      default_chain: "sol",
+    } as any),
+    rows = Array.from({ length: 30 }, (_, index) => ({
+      chain: index % 2 ? "bsc" : "sol",
+      address: address(index + 10),
+      market_cap: index < 22 ? 50_000 : 150_000,
+      is_microcap: index < 22,
+      volume: index * 1_000,
+      degen_sources: ["FILTERED TRENDING"],
+      degen_signal_labels: index % 7 === 0 ? ["PRICE SURGE"] : [],
+    }));
+  (service as any).degenRows.set(
+    "sol",
+    rows.filter((row) => row.chain === "sol"),
+  );
+  (service as any).degenRows.set(
+    "bsc",
+    rows.filter((row) => row.chain === "bsc"),
+  );
+  const selected = service.latestDegenAcross(["sol", "bsc"], 20);
+  assert.equal(selected.length, 20);
+  assert.equal(selected.filter((row) => row.market_cap <= 100_000).length, 20);
+});
 
-test("cross-chain degen digest reserves most slots for Robinhood",()=>{const previous=process.env.DEGEN_ROBINHOOD_MIN_SHARE;process.env.DEGEN_ROBINHOOD_MIN_SHARE="0.75";try{const service=new TrackerService({enabled_chains:["sol","bsc","robinhood"],default_chain:"sol"} as any),robinhood=Array.from({length:20},(_,index)=>({chain:"robinhood",address:address(index+100),market_cap:90_000,is_microcap:true,volume:1,degen_sources:["PONS ACTIVE"],degen_signal_labels:["NEW ACTIVE LAUNCH"]})),other=Array.from({length:20},(_,index)=>({chain:index%2?"sol":"bsc",address:address(index+200),market_cap:10_000,is_microcap:true,volume:1_000_000-index,degen_sources:["FILTERED TRENDING"],degen_signal_labels:["PRICE SURGE"]}));(service as any).degenRows.set("robinhood",robinhood);(service as any).degenRows.set("sol",other.filter(row=>row.chain==="sol"));(service as any).degenRows.set("bsc",other.filter(row=>row.chain==="bsc"));const selected=service.latestDegenAcross(["sol","bsc","robinhood"],20);assert.equal(selected.length,20);assert.ok(selected.filter(row=>row.chain==="robinhood").length>=15);}finally{if(previous===undefined)delete process.env.DEGEN_ROBINHOOD_MIN_SHARE;else process.env.DEGEN_ROBINHOOD_MIN_SHARE=previous;}});
+test("cross-chain degen digest reserves most slots for Robinhood", () => {
+  const previous = process.env.DEGEN_ROBINHOOD_MIN_SHARE;
+  process.env.DEGEN_ROBINHOOD_MIN_SHARE = "0.75";
+  try {
+    const service = new TrackerService({
+        enabled_chains: ["sol", "bsc", "robinhood"],
+        default_chain: "sol",
+      } as any),
+      robinhood = Array.from({ length: 20 }, (_, index) => ({
+        chain: "robinhood",
+        address: address(index + 100),
+        market_cap: 90_000,
+        is_microcap: true,
+        volume: 1,
+        degen_sources: ["PONS ACTIVE"],
+        degen_signal_labels: ["NEW ACTIVE LAUNCH"],
+      })),
+      other = Array.from({ length: 20 }, (_, index) => ({
+        chain: index % 2 ? "sol" : "bsc",
+        address: address(index + 200),
+        market_cap: 10_000,
+        is_microcap: true,
+        volume: 1_000_000 - index,
+        degen_sources: ["FILTERED TRENDING"],
+        degen_signal_labels: ["PRICE SURGE"],
+      }));
+    (service as any).degenRows.set("robinhood", robinhood);
+    (service as any).degenRows.set(
+      "sol",
+      other.filter((row) => row.chain === "sol"),
+    );
+    (service as any).degenRows.set(
+      "bsc",
+      other.filter((row) => row.chain === "bsc"),
+    );
+    const selected = service.latestDegenAcross(["sol", "bsc", "robinhood"], 20);
+    assert.equal(selected.length, 20);
+    assert.ok(selected.filter((row) => row.chain === "robinhood").length >= 15);
+  } finally {
+    if (previous === undefined) delete process.env.DEGEN_ROBINHOOD_MIN_SHARE;
+    else process.env.DEGEN_ROBINHOOD_MIN_SHARE = previous;
+  }
+});
 
-test("Pons cards are enriched only after the delivery safety screen passes",async()=>{const gmgn={tokenInfo:async()=>({name:"Printer",symbol:"BRRR",circulating_supply:"1000000000",max_supply:"1000000000",ath_price:"0.0009",liquidity:"60000",holder_count:300,creation_timestamp:1_999_000,price:{price:"0.0002",price_1h:"0.00025",volume_1h:"120000",volume_24h:"240000",buys_1h:100,sells_1h:80},pool:{pool_address:"0xpool",exchange:"pons_v2"},stat:{top_10_holder_rate:.2,fresh_wallet_rate:.1},wallet_tags_stat:{smart_wallets:3},link:{gmgn:"https://gmgn.ai/token"}}),tokenSecurity:async()=>({is_honeypot:false,is_blacklist:false,can_not_sell:0,is_open_source:true,is_renounced:true,buy_tax:0,sell_tax:0,top_10_holder_rate:.2,lock_summary:{is_locked:true}}),tokenPool:async()=>({liquidity:60_000}),tokenHolders:async()=>[{address:address(999),amount_percentage:.08,usd_value:3200,tags:["smart_degen"]}]};const service=new TrackerService({...loadConfig(),enabled_chains:["robinhood"],default_chain:"robinhood"} as any,gmgn as any),[row]=await service.enrichDegenRows([{chain:"robinhood",address:address(998),pons_status:"ACTIVE",market_cap:1}]);assert.equal(row?.market_cap,200_000);assert.equal(row?.ath_market_cap,900_000);assert.ok(Math.abs(Number(row?.price_change_1h)+20)<1e-9);assert.equal(row?.top_holders[0].amount_percentage,.08);assert.equal(row?.safety_passed,true);});
+test("Pons cards are enriched only after the delivery safety screen passes", async () => {
+  const gmgn = {
+    tokenInfo: async () => ({
+      name: "Printer",
+      symbol: "BRRR",
+      circulating_supply: "1000000000",
+      max_supply: "1000000000",
+      ath_price: "0.0009",
+      liquidity: "60000",
+      holder_count: 300,
+      creation_timestamp: 1_999_000,
+      price: {
+        price: "0.0002",
+        price_1h: "0.00025",
+        volume_1h: "120000",
+        volume_24h: "240000",
+        buys_1h: 100,
+        sells_1h: 80,
+      },
+      pool: { pool_address: "0xpool", exchange: "pons_v2" },
+      stat: { top_10_holder_rate: 0.2, fresh_wallet_rate: 0.1 },
+      wallet_tags_stat: { smart_wallets: 3 },
+      link: { gmgn: "https://gmgn.ai/token" },
+    }),
+    tokenSecurity: async () => ({
+      is_honeypot: false,
+      is_blacklist: false,
+      can_not_sell: 0,
+      is_open_source: true,
+      is_renounced: true,
+      buy_tax: 0,
+      sell_tax: 0,
+      top_10_holder_rate: 0.2,
+      lock_summary: { is_locked: true },
+    }),
+    tokenPool: async () => ({ liquidity: 60_000 }),
+    tokenHolders: async () => [
+      { address: address(999), amount_percentage: 0.08, usd_value: 3200, tags: ["smart_degen"] },
+    ],
+  };
+  const service = new TrackerService(
+      { ...loadConfig(), enabled_chains: ["robinhood"], default_chain: "robinhood" } as any,
+      gmgn as any,
+    ),
+    [row] = await service.enrichDegenRows([
+      { chain: "robinhood", address: address(998), pons_status: "ACTIVE", market_cap: 1 },
+    ]);
+  assert.equal(row?.market_cap, 200_000);
+  assert.equal(row?.ath_market_cap, 900_000);
+  assert.ok(Math.abs(Number(row?.price_change_1h) + 20) < 1e-9);
+  assert.equal(row?.top_holders[0].amount_percentage, 0.08);
+  assert.equal(row?.safety_passed, true);
+});
 
-test("degen delivery suppresses unsafe tokens but retains the discovery decision",async()=>{const gmgn={tokenInfo:async()=>({symbol:"RUG",circulating_supply:1_000_000_000,holder_count:4,price:{price:.00018},stat:{top_10_holder_rate:0}}),tokenSecurity:async()=>({is_honeypot:true,is_blacklist:false,can_not_sell:1,is_open_source:true,is_renounced:true,buy_tax:0,sell_tax:0,top_10_holder_rate:0,lock_summary:{is_locked:true}}),tokenPool:async()=>({liquidity:803}),tokenHolders:async()=>[]},service=new TrackerService({...loadConfig(),enabled_chains:["robinhood"],default_chain:"robinhood"} as any,gmgn as any),token=address(997),rows=await service.enrichDegenRows([{chain:"robinhood",address:token,symbol:"RUG",degen_sources:["DEXSCREENER"],degen_signal_labels:["DEXSCREENER PRICE SURGE"],market_cap:180_000}]);assert.deepEqual(rows,[]);const [decision]=service.discoveryDecisions("robinhood",10,"suppressed");assert.equal(decision?.address,token);assert.equal(decision?.status,"suppressed");assert.ok(decision?.reasons.some((reason:string)=>reason.includes("honeypot")));});
+test("degen delivery suppresses unsafe tokens but retains the discovery decision", async () => {
+  const gmgn = {
+      tokenInfo: async () => ({
+        symbol: "RUG",
+        circulating_supply: 1_000_000_000,
+        holder_count: 4,
+        price: { price: 0.00018 },
+        stat: { top_10_holder_rate: 0 },
+      }),
+      tokenSecurity: async () => ({
+        is_honeypot: true,
+        is_blacklist: false,
+        can_not_sell: 1,
+        is_open_source: true,
+        is_renounced: true,
+        buy_tax: 0,
+        sell_tax: 0,
+        top_10_holder_rate: 0,
+        lock_summary: { is_locked: true },
+      }),
+      tokenPool: async () => ({ liquidity: 803 }),
+      tokenHolders: async () => [],
+    },
+    service = new TrackerService(
+      { ...loadConfig(), enabled_chains: ["robinhood"], default_chain: "robinhood" } as any,
+      gmgn as any,
+    ),
+    token = address(997),
+    rows = await service.enrichDegenRows([
+      {
+        chain: "robinhood",
+        address: token,
+        symbol: "RUG",
+        degen_sources: ["DEXSCREENER"],
+        degen_signal_labels: ["DEXSCREENER PRICE SURGE"],
+        market_cap: 180_000,
+      },
+    ]);
+  assert.deepEqual(rows, []);
+  const [decision] = service.discoveryDecisions("robinhood", 10, "suppressed");
+  assert.equal(decision?.address, token);
+  assert.equal(decision?.status, "suppressed");
+  assert.ok(decision?.reasons.some((reason: string) => reason.includes("honeypot")));
+});

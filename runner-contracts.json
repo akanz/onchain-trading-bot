@@ -1,0 +1,136 @@
+{
+  "version": 1,
+  "description": "User-confirmed runner contracts whose top 100 GMGN traders must be included in wallet-roster discovery.",
+  "contracts": [
+    {
+      "chain": "robinhood",
+      "address": "0x3b4a0048a00787a644932cd648faa043410c163e"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0x2cc0fac44b8252f6b10208b091aff2c94b4da77d",
+      "symbol": "INJOH"
+    },
+    {
+      "chain": "sol",
+      "address": "9EmtjLFXwWSz828eyLunxmoWZNdoEjpw1nbxsEwGpump"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0xf090a835eccfa66f514344ffcb01b275ea997777"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0xe9ab3214a9b77baebfde2b6d17dec4823599ff6f"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0x04a2df398b60d528ee7d1a0b5f20159eab922b36"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0xe81880c1c5054245e036359f5c7be31606e79f56"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0xdCe5C6317222C5b6e5d963EeAC010DFc4dA9e6da"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0x5173d45a1191ee33cbb7d8c7e65f21b04ed54802",
+      "symbol": "RAM"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0x58a63fc168d3cd4309d067c6c89e5f3da975caa9",
+      "symbol": "BEDROCK"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0xded852de9fe9ba9b6f27f39e8e81cf851a5c79cc",
+      "symbol": "ROBINCAT"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0xaa07a0e9209e16ac99708c3ec70159c6ef3128a3",
+      "symbol": "ORBIO"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0x2e8c31162b855a2ffa90f6f8634643ad6f111e18",
+      "symbol": "AI"
+    },
+    {
+      "chain": "bsc",
+      "address": "0xbeea1d618e533a387d941f58a7d4c9b7bd377777",
+      "symbol": "牛来"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0x98096d17e191b3da1d5f99a6d7b3584351b11e18",
+      "symbol": "BONER"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0x020bfc650a365f8bb26819deaabf3e21291018b4",
+      "symbol": "CASHCAT"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0x39dbed3a2bd333467115de45665cc57f813c4571",
+      "symbol": "PONS"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0xfe7e19cbce2f896c6c528bc355baf5a768291e18",
+      "symbol": "SPACEHOOD"
+    },
+    {
+      "chain": "sol",
+      "address": "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump",
+      "symbol": "CATE"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0xbe98b75361935b18d688409424a869a4c3dc7401",
+      "symbol": "NUDES"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0xd5f1afea47b1a9eab414d2ee740cf1d6d039e725",
+      "symbol": "microduck"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0x6245e67affa44a23077f0ea7f981a8dc743a0c47",
+      "symbol": "FRONG"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0x57c0e45cb534413d1c20a4240955d6bb250bb4f1",
+      "symbol": "UP"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0x756a626544d90585ff9e5e6edef5406a69b45c9c",
+      "symbol": "BAWSAQ"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0x45242320dbb855eea8fd36804c6487e10e97fcf9",
+      "symbol": "TENDIES"
+    },
+    {
+      "chain": "robinhood",
+      "address": "0x56910d4409f3a0c78c64dd8d0545ff0705389870",
+      "symbol": "Index"
+    }
+  ],
+  "excluded": [
+    {
+      "chain": "robinhood",
+      "address": "0x6fB3c1b45a1caBdd577369551bA9698f475E1e18",
+      "reason": "User identified this contract as a rug/honeypot example; never use it for wallet admission."
+    }
+  ]
+}

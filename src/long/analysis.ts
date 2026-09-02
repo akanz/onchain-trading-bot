@@ -1,19 +1,154 @@
 import { validTokenAddress } from "../signals.js";
 import type { Json } from "../types.js";
 
-const finite=(...values:unknown[]):number|undefined=>{for(const value of values){if(value===null||value===undefined||value==="")continue;const parsed=Number(value);if(Number.isFinite(parsed))return parsed;}return undefined;};
-const unix=(...values:unknown[]):number=>{for(const value of values){if(value===null||value===undefined||value==="")continue;const numeric=Number(value);if(Number.isFinite(numeric)&&numeric>0)return Math.floor(numeric>1e12?numeric/1000:numeric);const parsed=Date.parse(String(value));if(Number.isFinite(parsed))return Math.floor(parsed/1000);}return 0;};
-const text=(...values:unknown[]):string|undefined=>values.map(value=>String(value??"").trim()).find(Boolean);
+const finite = (...values: unknown[]): number | undefined => {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+};
+const unix = (...values: unknown[]): number => {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric > 0)
+      return Math.floor(numeric > 1e12 ? numeric / 1000 : numeric);
+    const parsed = Date.parse(String(value));
+    if (Number.isFinite(parsed)) return Math.floor(parsed / 1000);
+  }
+  return 0;
+};
+const text = (...values: unknown[]): string | undefined =>
+  values.map((value) => String(value ?? "").trim()).find(Boolean);
 
-export function normalizeLongAsset(row:Json,now=Math.floor(Date.now()/1000)):Json|undefined{
-  const token=row.token??row.asset??row,rawAddress=text(token.address,token.tokenAddress,token.token_address,row.tokenAddress,row.token_address,row.assetAddress,row.contractAddress,row.contract_address,row.address),address=rawAddress&&validTokenAddress("robinhood",rawAddress)?rawAddress:undefined;
-  if(!address)return undefined;
-  const createdAt=unix(row.createdAt,row.created_at,row.deployedAt,row.deployed_at,row.launchedAt,row.launch_at,row.timestamp,token.createdAt,token.created_at),marketCap=finite(row.marketCapUsd,row.market_cap_usd,row.marketCap,row.market_cap,row.fdvUsd,row.fdv_usd,row.fdv,row.valuation,token.marketCap,token.market_cap),liquidity=finite(row.liquidityUsd,row.liquidity_usd,row.liquidity,token.liquidity),volume24=finite(row.volume24hUsd,row.volume_24h_usd,row.volume24h,row.volume_24h,row.volume24,row.volume,token.volume24h),price=finite(row.priceUsd,row.price_usd,row.price,token.price),status=String(row.status??row.auctionStatus??row.state??"ACTIVE").toUpperCase();
-  return {chain:"robinhood",address,name:text(token.name,row.name),symbol:text(token.symbol,token.ticker,row.symbol,row.ticker),price,market_cap:marketCap,liquidity,volume_24h:volume24,holder_count:finite(row.holderCount,row.holder_count,token.holderCount),trade_count:finite(row.tradeCount,row.trade_count,row.transactions,row.txCount),creator:text(row.creator,row.creatorAddress,row.deployer,row.owner),pair_token:text(row.quoteTokenAddress,row.pairToken,row.anchorAddress),quote_symbol:text(row.quoteSymbol,row.anchorSymbol,row.pairSymbol),long_status:status,long_created_at:createdAt,long_launch_age_seconds:createdAt?Math.max(0,now-createdAt):undefined,long_url:`https://app.long.xyz/tokens/${address}`,is_microcap:marketCap!==undefined&&marketCap>0&&marketCap<=Number(process.env.DEGEN_MAX_MARKET_CAP_USD??100000),degen_sources:["LONG LAUNCHPAD"],degen_signal_labels:[],quality_passed:false,quality_reasons:["Long launchpad discovery; full contract, holder, and liquidity checks have not passed"]};
+export function normalizeLongAsset(
+  row: Json,
+  now = Math.floor(Date.now() / 1000),
+): Json | undefined {
+  const token = row.token ?? row.asset ?? row,
+    rawAddress = text(
+      token.address,
+      token.tokenAddress,
+      token.token_address,
+      row.tokenAddress,
+      row.token_address,
+      row.assetAddress,
+      row.contractAddress,
+      row.contract_address,
+      row.address,
+    ),
+    address = rawAddress && validTokenAddress("robinhood", rawAddress) ? rawAddress : undefined;
+  if (!address) return undefined;
+  const createdAt = unix(
+      row.createdAt,
+      row.created_at,
+      row.deployedAt,
+      row.deployed_at,
+      row.launchedAt,
+      row.launch_at,
+      row.timestamp,
+      token.createdAt,
+      token.created_at,
+    ),
+    marketCap = finite(
+      row.marketCapUsd,
+      row.market_cap_usd,
+      row.marketCap,
+      row.market_cap,
+      row.fdvUsd,
+      row.fdv_usd,
+      row.fdv,
+      row.valuation,
+      token.marketCap,
+      token.market_cap,
+    ),
+    liquidity = finite(row.liquidityUsd, row.liquidity_usd, row.liquidity, token.liquidity),
+    volume24 = finite(
+      row.volume24hUsd,
+      row.volume_24h_usd,
+      row.volume24h,
+      row.volume_24h,
+      row.volume24,
+      row.volume,
+      token.volume24h,
+    ),
+    price = finite(row.priceUsd, row.price_usd, row.price, token.price),
+    status = String(row.status ?? row.auctionStatus ?? row.state ?? "ACTIVE").toUpperCase();
+  return {
+    chain: "robinhood",
+    address,
+    name: text(token.name, row.name),
+    symbol: text(token.symbol, token.ticker, row.symbol, row.ticker),
+    price,
+    market_cap: marketCap,
+    liquidity,
+    volume_24h: volume24,
+    holder_count: finite(row.holderCount, row.holder_count, token.holderCount),
+    trade_count: finite(row.tradeCount, row.trade_count, row.transactions, row.txCount),
+    creator: text(row.creator, row.creatorAddress, row.deployer, row.owner),
+    pair_token: text(row.quoteTokenAddress, row.pairToken, row.anchorAddress),
+    quote_symbol: text(row.quoteSymbol, row.anchorSymbol, row.pairSymbol),
+    long_status: status,
+    long_created_at: createdAt,
+    long_launch_age_seconds: createdAt ? Math.max(0, now - createdAt) : undefined,
+    long_url: `https://app.long.xyz/tokens/${address}`,
+    is_microcap:
+      marketCap !== undefined &&
+      marketCap > 0 &&
+      marketCap <= Number(process.env.DEGEN_MAX_MARKET_CAP_USD ?? 100000),
+    degen_sources: ["LONG LAUNCHPAD"],
+    degen_signal_labels: [],
+    quality_passed: false,
+    quality_reasons: [
+      "Long launchpad discovery; full contract, holder, and liquidity checks have not passed",
+    ],
+  };
 }
 
-export function qualifyLongAssets(rows:Json[],now=Math.floor(Date.now()/1000),initial=false):Json[]{
-  const maximumAge=Math.max(60,Number(process.env.LONG_MAX_LAUNCH_AGE_SECONDS??21600)),initialAge=Math.min(maximumAge,Math.max(60,Number(process.env.LONG_INITIAL_BACKFILL_SECONDS??900))),minimumMarketCap=Math.max(0,Number(process.env.LONG_MIN_MARKET_CAP_USD??10000)),maximumMarketCap=Math.max(minimumMarketCap,Number(process.env.LONG_MAX_MARKET_CAP_USD??500000)),minimumVolume=Math.max(0,Number(process.env.LONG_MIN_VOLUME_24H_USD??0)),minimumTrades=Math.max(0,Number(process.env.LONG_MIN_TRADE_COUNT??0)),blocked=new Set(["FAILED","CANCELLED","CANCELED","REJECTED","DRAFT"]),qualified:Json[]=[];
-  for(const row of rows){const asset=normalizeLongAsset(row,now);if(!asset||blocked.has(String(asset.long_status)))continue;const age=Number(asset.long_launch_age_seconds),marketCap=Number(asset.market_cap),volume=Number(asset.volume_24h??0),trades=Number(asset.trade_count??0);if(!Number.isFinite(age)||age<0||age>(initial?initialAge:maximumAge))continue;if(!Number.isFinite(marketCap)||marketCap<minimumMarketCap||marketCap>maximumMarketCap)continue;if(volume<minimumVolume||trades<minimumTrades)continue;qualified.push({...asset,degen_signal_labels:["LONG NEW LAUNCH"],degen_sources:["LONG LAUNCHPAD","LONG NEW LAUNCH"],long_signal_score:50});}
-  return qualified.sort((a,b)=>Number(a.long_launch_age_seconds)-Number(b.long_launch_age_seconds)||Number(b.volume_24h??0)-Number(a.volume_24h??0)).slice(0,Math.max(0,Math.floor(Number(process.env.LONG_MAX_CANDIDATES_PER_SCAN??3))));
+export function qualifyLongAssets(
+  rows: Json[],
+  now = Math.floor(Date.now() / 1000),
+  initial = false,
+): Json[] {
+  const maximumAge = Math.max(60, Number(process.env.LONG_MAX_LAUNCH_AGE_SECONDS ?? 21600)),
+    initialAge = Math.min(
+      maximumAge,
+      Math.max(60, Number(process.env.LONG_INITIAL_BACKFILL_SECONDS ?? 900)),
+    ),
+    minimumMarketCap = Math.max(0, Number(process.env.LONG_MIN_MARKET_CAP_USD ?? 10000)),
+    maximumMarketCap = Math.max(
+      minimumMarketCap,
+      Number(process.env.LONG_MAX_MARKET_CAP_USD ?? 500000),
+    ),
+    minimumVolume = Math.max(0, Number(process.env.LONG_MIN_VOLUME_24H_USD ?? 0)),
+    minimumTrades = Math.max(0, Number(process.env.LONG_MIN_TRADE_COUNT ?? 0)),
+    blocked = new Set(["FAILED", "CANCELLED", "CANCELED", "REJECTED", "DRAFT"]),
+    qualified: Json[] = [];
+  for (const row of rows) {
+    const asset = normalizeLongAsset(row, now);
+    if (!asset || blocked.has(String(asset.long_status))) continue;
+    const age = Number(asset.long_launch_age_seconds),
+      marketCap = Number(asset.market_cap),
+      volume = Number(asset.volume_24h ?? 0),
+      trades = Number(asset.trade_count ?? 0);
+    if (!Number.isFinite(age) || age < 0 || age > (initial ? initialAge : maximumAge)) continue;
+    if (!Number.isFinite(marketCap) || marketCap < minimumMarketCap || marketCap > maximumMarketCap)
+      continue;
+    if (volume < minimumVolume || trades < minimumTrades) continue;
+    qualified.push({
+      ...asset,
+      degen_signal_labels: ["LONG NEW LAUNCH"],
+      degen_sources: ["LONG LAUNCHPAD", "LONG NEW LAUNCH"],
+      long_signal_score: 50,
+    });
+  }
+  return qualified
+    .sort(
+      (a, b) =>
+        Number(a.long_launch_age_seconds) - Number(b.long_launch_age_seconds) ||
+        Number(b.volume_24h ?? 0) - Number(a.volume_24h ?? 0),
+    )
+    .slice(0, Math.max(0, Math.floor(Number(process.env.LONG_MAX_CANDIDATES_PER_SCAN ?? 3))));
 }

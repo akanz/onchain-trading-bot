@@ -1,32 +1,435 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FomoClient, fomoChain, fomoSwapLegs } from "../src/fomo/client.js";
+import {
+  FomoClient,
+  fomoChain,
+  fomoSwapLegs,
+  isFomoAuthorizationError,
+} from "../src/fomo/client.js";
 import { fomoProfileInsights, fomoTradeGate, passesFomoProfile } from "../src/fomo/analysis.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isUsableFomoToken, readStoredFomoToken, saveFomoToken, selectFomoToken } from "../src/fomo/token-store.js";
-import { buildEliteFomoWalletsFromInsights, buildFomoTrackedWallets } from "../src/fomo/tracking.js";
+import {
+  isUsableFomoToken,
+  readStoredFomoToken,
+  saveFomoToken,
+  selectFomoToken,
+} from "../src/fomo/token-store.js";
+import {
+  buildEliteFomoWalletsFromInsights,
+  buildFomoTrackedWallets,
+} from "../src/fomo/tracking.js";
 import { loadConfig } from "../src/config.js";
 import { TrackerService } from "../src/service.js";
-import { mergeFomoDiscoveryRows, readFomoDiscoverySnapshot, saveFomoDiscoverySnapshot } from "../src/fomo/discovery-store.js";
+import {
+  mergeFomoDiscoveryRows,
+  readFomoDiscoverySnapshot,
+  saveFomoDiscoverySnapshot,
+} from "../src/fomo/discovery-store.js";
 
-const fakeToken=(expiry:number,issuer="privy.io")=>`${Buffer.from("{}").toString("base64url")}.${Buffer.from(JSON.stringify({iss:issuer,exp:expiry})).toString("base64url")}.signature`;
+const fakeToken = (expiry: number, issuer = "privy.io") =>
+  `${Buffer.from("{}").toString("base64url")}.${Buffer.from(JSON.stringify({ iss: issuer, exp: expiry })).toString("base64url")}.signature`;
 
-test("Fomo holder ROI retains total, realized, and unrealized components",()=>{const client=new FomoClient(),base={user:{address:"So11111111111111111111111111111111111111112",numTrades:100,totalVolume:10000},costBasis:100,value:600,pnl:500,realizedPnl:100,unrealizedPnl:400,isDev:false},holder=client.eligibleHolder(base);assert.equal(holder?.roiPercent,500);assert.equal(holder?.realizedRoiPercent,100);assert.equal(holder?.unrealizedRoiPercent,400);assert.equal(client.eligibleHolder({...base,pnl:499}),null);assert.equal(client.eligibleHolder({...base,pnl:400,realizedPnl:600,unrealizedPnl:-200})?.realizedRoiPercent,600);assert.equal(client.eligibleHolder({...base,pnl:1500})?.roiPercent,1500);assert.equal(client.eligibleHolder({...base,costBasis:0}),null);});
-test("Fomo leaderboard insights measure efficiency and top-holding consistency",()=>{const profile={totalPnL:2000,totalVolume:10000,numTrades:100,swapCount:50,followers:10,topHoldings:[{networkId:56,value:200,pnl:100},{networkId:8453,value:100,pnl:-20}]};const insight=fomoProfileInsights(profile);assert.equal(insight.fomo_pnl_efficiency,.2);assert.equal(insight.profitable_top_holding_rate,.5);assert.equal(insight.network_count,2);assert.equal(passesFomoProfile(profile),true);});
-test("period leaderboard PnL qualifies profiles without an all-time row",()=>{const profile={pnl24h:5000,totalVolume:10000,numTrades:100,topHoldings:[{networkId:56,value:200,pnl:100},{networkId:8453,value:100,pnl:20}],leaderboard_periods:["24h"],leaderboard_ranks:{"24h":4}};const insight=fomoProfileInsights(profile);assert.equal(insight.fomo_pnl_24h,5000);assert.equal(insight.fomo_leaderboard_pnl,5000);assert.equal(passesFomoProfile(profile),true);});
-test("Fomo leaderboards merge period membership and retain ranks",async()=>{const client=new FomoClient(),rows:Record<string,any[]>={"24h":[{id:"a",userHandle:"alpha",pnl24h:10}],"7d":[{id:"b",userHandle:"beta",pnl7d:20},{id:"a",userHandle:"alpha",pnl7d:15}],"30d":[{id:"a",userHandle:"alpha",pnl30d:30}],all:[]};(client as any).leaderboard=async(period:string)=>rows[period];const result=await client.leaderboards(["24h","7d","30d"]);assert.equal(result.profiles.length,2);const alpha=result.profiles.find(row=>row.id==="a")!;assert.deepEqual(alpha.leaderboard_periods,["24h","7d","30d"]);assert.deepEqual(alpha.leaderboard_ranks,{"24h":1,"7d":2,"30d":1});assert.deepEqual(alpha.leaderboard_pnl,{"24h":10,"7d":15,"30d":30});});
-test("Fomo swap monitoring requests 100 actual swaps",async()=>{const client=new FomoClient();let path="";(client as any).request=async(value:string)=>{path=value;return {swaps:[]};};await client.userSwaps("user id");assert.equal(path,"/v2/users/user%20id/swaps?limit=100");});
-test("Fomo swaps retain both tracked-token buy and sell legs",()=>{const legs=fomoSwapLegs({outTradeId:"buy-1",outNetworkId:4663,outTokenAddress:"0x1111111111111111111111111111111111111111",humanUsdAmountOut:250,inTradeId:"sell-1",inNetworkId:56,inTokenAddress:"0x2222222222222222222222222222222222222222",humanUsdAmountIn:400});assert.deepEqual(legs.map(row=>({side:row.side,networkId:row.networkId,tokenAddress:row.tokenAddress,amount:row.amount_usd})),[{side:"buy",networkId:4663,tokenAddress:"0x1111111111111111111111111111111111111111",amount:250},{side:"sell",networkId:56,tokenAddress:"0x2222222222222222222222222222222222222222",amount:400}]);});
-test("Fomo discovery proxy calls omit the request body to retain mixed-chain rows",async()=>{const client=new FomoClient(),calls:any[][]=[];(client as any).request=async(...args:any[])=>{calls.push(args);return [];};await Promise.all([client.mostHeld(),client.trending()]);assert.deepEqual(calls,[["/proxy/mostHeld","POST"],["/proxy/trendingTokens","POST"]]);});
-test("browser-captured Fomo discovery fills mixed-chain rows omitted by the direct proxy",()=>{const sol={token:{networkId:1399811149,address:"So11111111111111111111111111111111111111112",symbol:"SOL"}},robinhood={token:{networkId:4663,address:"0x1111111111111111111111111111111111111111",symbol:"ROBINCAT"}},updated={...sol,marketCap:2};assert.deepEqual(mergeFomoDiscoveryRows([updated],[sol,robinhood]),[sol,robinhood].map(row=>row===sol?updated:row));});
-test("Fomo discovery snapshots persist only fresh browser responses",()=>{const dir=mkdtempSync(join(tmpdir(),"fomo-discovery-test-")),path=join(dir,"snapshot.json"),row={token:{networkId:4663,address:"0x1111111111111111111111111111111111111111"}};try{assert.equal(saveFomoDiscoverySnapshot(path,"trending",[row]),true);assert.deepEqual(readFomoDiscoverySnapshot(path)?.trending,[row]);assert.equal(readFomoDiscoverySnapshot(path,-1),null);}finally{rmSync(dir,{recursive:true,force:true});}});
-test("Fomo observed roster uses ATH rather than current market cap for trending holders",()=>{const sol="So11111111111111111111111111111111111111112",evm="0x1111111111111111111111111111111111111111",profiles=[{id:"leader",address:sol,evmAddress:evm,userHandle:"leader",leaderboard_periods:["24h"]}],holder=(id:string)=>({wallet:sol,roiPercent:600,realizedRoiPercent:500,unrealizedRoiPercent:100,user:{id,address:sol,evmAddress:evm,userHandle:id}}),tokens:any[]=[{address:sol,chain:"sol",networkId:1399811149,marketCap:100_000,athMarketCap:1_100_000,token:{symbol:"RETRACED"},sources:new Set(["fomo_trending"]),holders:[holder("trend-runner")]},{address:sol,chain:"sol",networkId:1399811149,marketCap:900_000,athMarketCap:950_000,token:{symbol:"NEVER"},sources:new Set(["fomo_trending"]),holders:[holder("trend-never-crossed")]}];const rows=buildFomoTrackedWallets(profiles,tokens,["sol","bsc"],1_000_000);assert.equal(new Set(rows.map(row=>row.fomo_user_id)).has("leader"),true);assert.equal(new Set(rows.map(row=>row.fomo_user_id)).has("trend-runner"),true);assert.equal(new Set(rows.map(row=>row.fomo_user_id)).has("trend-never-crossed"),false);assert.equal(rows.find(row=>row.fomo_user_id==="trend-runner")?.max_position_roi_percent,600);assert.equal(rows.filter(row=>row.fomo_user_id==="leader").length,2);});
-test("Fomo trending momentum runners remain eligible below the historical market-cap floor",()=>{const sol="So11111111111111111111111111111111111111112",holder={wallet:sol,roiPercent:600,realizedRoiPercent:600,unrealizedRoiPercent:0,user:{id:"momentum",address:sol,numTrades:100,totalVolume:10000}},token:any={address:sol,chain:"sol",networkId:1399811149,marketCap:700_000,athMarketCap:800_000,change24:4,token:{symbol:"FAST"},sources:new Set(["fomo_trending"]),holders:[holder]};const rows=buildFomoTrackedWallets([], [token], ["sol"],1_000_000);assert.equal(rows.some(row=>row.fomo_user_id==="momentum"),true);});
-test("elite Fomo leaderboard profit stays monitored without passing the closed-trade gate",()=>{const profiles=[{id:"unipcs",handle:"unipcs",address:"So11111111111111111111111111111111111111112",evm_address:"0x1111111111111111111111111111111111111111",fomo_leaderboard_pnl:3_183_000,native_gate:{passed:false}}],rows=buildEliteFomoWalletsFromInsights(profiles,["sol","base"]);assert.equal(rows.length,2);assert.equal(rows.every(row=>row.tracking_tier==="elite_observed"),true);assert.equal(rows.find(row=>row.chain==="base")?.wallet,"0x1111111111111111111111111111111111111111");});
-test("legacy observed Fomo Mongo rows recover their elite tier from stored evidence",()=>{const service=new TrackerService(loadConfig()),wallet="LegacyElite111111111111111111111111111111111";(service as any).mongoTrackedWalletRows=[{source:"fomo",chain:"sol",wallet,fomo_user_id:"legacy-profile",tracking_tier:"observed",max_position_roi_percent:750}];const row=(service as any).loadTrackedWalletRows().find((candidate:any)=>candidate.wallet===wallet);assert.equal(row?.tracking_tier,"elite_observed");});
-test("mixed Fomo token responses route each network independently",()=>{assert.equal(fomoChain(1399811149),"sol");assert.equal(fomoChain(56),"bsc");assert.equal(fomoChain(8453),"base");assert.equal(fomoChain(4663),"robinhood");assert.equal(fomoChain(1),"eth");assert.equal(fomoChain(1337),undefined);});
-test("Fomo-native trade gate enforces a 200 percent high-quality return floor",()=>{const cfg={min_roi_30d:2,min_win_rate_30d:.4,min_median_buy_usd:50,max_unique_tokens_in_100_actions:60},win=(i:number)=>({trade:{id:String(i),closedAt:new Date().toISOString(),realizedPnlUsd:600,totalCostBasis:200,networkId:1399811149,tokenAddress:`token${i}`}}),loss=(i:number)=>({trade:{id:String(i),closedAt:new Date().toISOString(),realizedPnlUsd:-50,totalCostBasis:200,networkId:1399811149,tokenAddress:`loss${i}`}});assert.equal(fomoTradeGate({closedTrades:[...Array.from({length:8},(_,i)=>win(i)),...Array.from({length:2},(_,i)=>loss(i))],activeTrades:[]},cfg).passed,true);assert.equal(fomoTradeGate({closedTrades:[...Array.from({length:8},(_,i)=>({...win(i),trade:{...win(i).trade,realizedPnlUsd:100}})),...Array.from({length:2},(_,i)=>loss(i))],activeTrades:[]},cfg).passed,false);});
+test("Fomo holder ROI retains total, realized, and unrealized components", () => {
+  const client = new FomoClient(),
+    base = {
+      user: {
+        address: "So11111111111111111111111111111111111111112",
+        numTrades: 100,
+        totalVolume: 10000,
+      },
+      costBasis: 100,
+      value: 600,
+      pnl: 500,
+      realizedPnl: 100,
+      unrealizedPnl: 400,
+      isDev: false,
+    },
+    holder = client.eligibleHolder(base);
+  assert.equal(holder?.roiPercent, 500);
+  assert.equal(holder?.realizedRoiPercent, 100);
+  assert.equal(holder?.unrealizedRoiPercent, 400);
+  assert.equal(client.eligibleHolder({ ...base, pnl: 499 }), null);
+  assert.equal(
+    client.eligibleHolder({ ...base, pnl: 400, realizedPnl: 600, unrealizedPnl: -200 })
+      ?.realizedRoiPercent,
+    600,
+  );
+  assert.equal(client.eligibleHolder({ ...base, pnl: 1500 })?.roiPercent, 1500);
+  assert.equal(client.eligibleHolder({ ...base, costBasis: 0 }), null);
+});
+test("Fomo leaderboard insights measure efficiency and top-holding consistency", () => {
+  const profile = {
+    totalPnL: 2000,
+    totalVolume: 10000,
+    numTrades: 100,
+    swapCount: 50,
+    followers: 10,
+    topHoldings: [
+      { networkId: 56, value: 200, pnl: 100 },
+      { networkId: 8453, value: 100, pnl: -20 },
+    ],
+  };
+  const insight = fomoProfileInsights(profile);
+  assert.equal(insight.fomo_pnl_efficiency, 0.2);
+  assert.equal(insight.profitable_top_holding_rate, 0.5);
+  assert.equal(insight.network_count, 2);
+  assert.equal(passesFomoProfile(profile), true);
+});
+test("period leaderboard PnL qualifies profiles without an all-time row", () => {
+  const profile = {
+    pnl24h: 5000,
+    totalVolume: 10000,
+    numTrades: 100,
+    topHoldings: [
+      { networkId: 56, value: 200, pnl: 100 },
+      { networkId: 8453, value: 100, pnl: 20 },
+    ],
+    leaderboard_periods: ["24h"],
+    leaderboard_ranks: { "24h": 4 },
+  };
+  const insight = fomoProfileInsights(profile);
+  assert.equal(insight.fomo_pnl_24h, 5000);
+  assert.equal(insight.fomo_leaderboard_pnl, 5000);
+  assert.equal(passesFomoProfile(profile), true);
+});
+test("Fomo leaderboards merge period membership and retain ranks", async () => {
+  const client = new FomoClient(),
+    rows: Record<string, any[]> = {
+      "24h": [{ id: "a", userHandle: "alpha", pnl24h: 10 }],
+      "7d": [
+        { id: "b", userHandle: "beta", pnl7d: 20 },
+        { id: "a", userHandle: "alpha", pnl7d: 15 },
+      ],
+      "30d": [{ id: "a", userHandle: "alpha", pnl30d: 30 }],
+      all: [],
+    };
+  (client as any).leaderboard = async (period: string) => rows[period];
+  const result = await client.leaderboards(["24h", "7d", "30d"]);
+  assert.equal(result.profiles.length, 2);
+  const alpha = result.profiles.find((row) => row.id === "a")!;
+  assert.deepEqual(alpha.leaderboard_periods, ["24h", "7d", "30d"]);
+  assert.deepEqual(alpha.leaderboard_ranks, { "24h": 1, "7d": 2, "30d": 1 });
+  assert.deepEqual(alpha.leaderboard_pnl, { "24h": 10, "7d": 15, "30d": 30 });
+});
+test("Fomo swap monitoring requests 100 actual swaps", async () => {
+  const client = new FomoClient();
+  let path = "";
+  (client as any).request = async (value: string) => {
+    path = value;
+    return { swaps: [] };
+  };
+  await client.userSwaps("user id");
+  assert.equal(path, "/v2/users/user%20id/swaps?limit=100");
+});
+test("Fomo swaps retain both tracked-token buy and sell legs", () => {
+  const legs = fomoSwapLegs({
+    outTradeId: "buy-1",
+    outNetworkId: 4663,
+    outTokenAddress: "0x1111111111111111111111111111111111111111",
+    humanUsdAmountOut: 250,
+    inTradeId: "sell-1",
+    inNetworkId: 56,
+    inTokenAddress: "0x2222222222222222222222222222222222222222",
+    humanUsdAmountIn: 400,
+  });
+  assert.deepEqual(
+    legs.map((row) => ({
+      side: row.side,
+      networkId: row.networkId,
+      tokenAddress: row.tokenAddress,
+      amount: row.amount_usd,
+    })),
+    [
+      {
+        side: "buy",
+        networkId: 4663,
+        tokenAddress: "0x1111111111111111111111111111111111111111",
+        amount: 250,
+      },
+      {
+        side: "sell",
+        networkId: 56,
+        tokenAddress: "0x2222222222222222222222222222222222222222",
+        amount: 400,
+      },
+    ],
+  );
+});
+test("Fomo discovery proxy calls omit the request body to retain mixed-chain rows", async () => {
+  const client = new FomoClient(),
+    calls: any[][] = [];
+  (client as any).request = async (...args: any[]) => {
+    calls.push(args);
+    return [];
+  };
+  await Promise.all([client.mostHeld(), client.trending()]);
+  assert.deepEqual(calls, [
+    ["/proxy/mostHeld", "POST"],
+    ["/proxy/trendingTokens", "POST"],
+  ]);
+});
+test("Fomo stops reusing a bearer after the API rejects it", async () => {
+  const originalToken = process.env.FOMO_TOKEN;
+  const originalTokenFile = process.env.FOMO_TOKEN_FILE;
+  const originalFetch = globalThis.fetch;
+  const directory = mkdtempSync(join(tmpdir(), "fomo-auth-test-"));
+  let requests = 0;
 
-test("browser-refreshed Fomo token safely supersedes the static env token",()=>{const dir=mkdtempSync(join(tmpdir(),"fomo-token-test-")),path=join(dir,"token.json"),now=Math.floor(Date.now()/1000),env=fakeToken(now+600),fresh=fakeToken(now+3600);try{assert.equal(isUsableFomoToken(fakeToken(now+3600,"not-privy")),false);assert.equal(saveFomoToken(path,fresh),true);assert.equal(readStoredFomoToken(path),fresh);assert.equal(selectFomoToken(env,path),fresh);assert.equal(saveFomoToken(path,fresh),false);}finally{rmSync(dir,{recursive:true,force:true});}});
+  process.env.FOMO_TOKEN = fakeToken(Math.floor(Date.now() / 1000) + 3600);
+  process.env.FOMO_TOKEN_FILE = join(directory, "missing-token.json");
+  globalThis.fetch = (async () => {
+    requests += 1;
+    return new Response("forbidden", { status: 403 });
+  }) as typeof fetch;
+
+  try {
+    const client = new FomoClient();
+    await assert.rejects(() => client.userSwaps("profile"), isFomoAuthorizationError);
+    assert.equal(client.enabled, false);
+    await assert.rejects(() => client.userSwaps("another-profile"), isFomoAuthorizationError);
+    assert.equal(requests, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalToken === undefined) delete process.env.FOMO_TOKEN;
+    else process.env.FOMO_TOKEN = originalToken;
+    if (originalTokenFile === undefined) delete process.env.FOMO_TOKEN_FILE;
+    else process.env.FOMO_TOKEN_FILE = originalTokenFile;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("browser-captured Fomo discovery fills mixed-chain rows omitted by the direct proxy", () => {
+  const sol = {
+      token: {
+        networkId: 1399811149,
+        address: "So11111111111111111111111111111111111111112",
+        symbol: "SOL",
+      },
+    },
+    robinhood = {
+      token: {
+        networkId: 4663,
+        address: "0x1111111111111111111111111111111111111111",
+        symbol: "ROBINCAT",
+      },
+    },
+    updated = { ...sol, marketCap: 2 };
+  assert.deepEqual(
+    mergeFomoDiscoveryRows([updated], [sol, robinhood]),
+    [sol, robinhood].map((row) => (row === sol ? updated : row)),
+  );
+});
+test("Fomo discovery snapshots persist only fresh browser responses", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fomo-discovery-test-")),
+    path = join(dir, "snapshot.json"),
+    row = { token: { networkId: 4663, address: "0x1111111111111111111111111111111111111111" } };
+  try {
+    assert.equal(saveFomoDiscoverySnapshot(path, "trending", [row]), true);
+    assert.deepEqual(readFomoDiscoverySnapshot(path)?.trending, [row]);
+    assert.equal(readFomoDiscoverySnapshot(path, -1), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test("Fomo observed roster uses ATH rather than current market cap for trending holders", () => {
+  const sol = "So11111111111111111111111111111111111111112",
+    evm = "0x1111111111111111111111111111111111111111",
+    profiles = [
+      {
+        id: "leader",
+        address: sol,
+        evmAddress: evm,
+        userHandle: "leader",
+        leaderboard_periods: ["24h"],
+      },
+    ],
+    holder = (id: string) => ({
+      wallet: sol,
+      roiPercent: 600,
+      realizedRoiPercent: 500,
+      unrealizedRoiPercent: 100,
+      user: { id, address: sol, evmAddress: evm, userHandle: id },
+    }),
+    tokens: any[] = [
+      {
+        address: sol,
+        chain: "sol",
+        networkId: 1399811149,
+        marketCap: 100_000,
+        athMarketCap: 1_100_000,
+        token: { symbol: "RETRACED" },
+        sources: new Set(["fomo_trending"]),
+        holders: [holder("trend-runner")],
+      },
+      {
+        address: sol,
+        chain: "sol",
+        networkId: 1399811149,
+        marketCap: 900_000,
+        athMarketCap: 950_000,
+        token: { symbol: "NEVER" },
+        sources: new Set(["fomo_trending"]),
+        holders: [holder("trend-never-crossed")],
+      },
+    ];
+  const rows = buildFomoTrackedWallets(profiles, tokens, ["sol", "bsc"], 1_000_000);
+  assert.equal(new Set(rows.map((row) => row.fomo_user_id)).has("leader"), true);
+  assert.equal(new Set(rows.map((row) => row.fomo_user_id)).has("trend-runner"), true);
+  assert.equal(new Set(rows.map((row) => row.fomo_user_id)).has("trend-never-crossed"), false);
+  assert.equal(
+    rows.find((row) => row.fomo_user_id === "trend-runner")?.max_position_roi_percent,
+    600,
+  );
+  assert.equal(rows.filter((row) => row.fomo_user_id === "leader").length, 2);
+});
+test("Fomo trending momentum runners remain eligible below the historical market-cap floor", () => {
+  const sol = "So11111111111111111111111111111111111111112",
+    holder = {
+      wallet: sol,
+      roiPercent: 600,
+      realizedRoiPercent: 600,
+      unrealizedRoiPercent: 0,
+      user: { id: "momentum", address: sol, numTrades: 100, totalVolume: 10000 },
+    },
+    token: any = {
+      address: sol,
+      chain: "sol",
+      networkId: 1399811149,
+      marketCap: 700_000,
+      athMarketCap: 800_000,
+      change24: 4,
+      token: { symbol: "FAST" },
+      sources: new Set(["fomo_trending"]),
+      holders: [holder],
+    };
+  const rows = buildFomoTrackedWallets([], [token], ["sol"], 1_000_000);
+  assert.equal(
+    rows.some((row) => row.fomo_user_id === "momentum"),
+    true,
+  );
+});
+test("elite Fomo leaderboard profit stays monitored without passing the closed-trade gate", () => {
+  const profiles = [
+      {
+        id: "unipcs",
+        handle: "unipcs",
+        address: "So11111111111111111111111111111111111111112",
+        evm_address: "0x1111111111111111111111111111111111111111",
+        fomo_leaderboard_pnl: 3_183_000,
+        native_gate: { passed: false },
+      },
+    ],
+    rows = buildEliteFomoWalletsFromInsights(profiles, ["sol", "base"]);
+  assert.equal(rows.length, 2);
+  assert.equal(
+    rows.every((row) => row.tracking_tier === "elite_observed"),
+    true,
+  );
+  assert.equal(
+    rows.find((row) => row.chain === "base")?.wallet,
+    "0x1111111111111111111111111111111111111111",
+  );
+});
+test("Fomo Mongo rows are excluded from the active wallet roster", () => {
+  const service = new TrackerService(loadConfig()),
+    wallet = "LegacyElite111111111111111111111111111111111";
+  (service as any).mongoTrackedWalletRows = [
+    {
+      source: "fomo",
+      chain: "sol",
+      wallet,
+      fomo_user_id: "legacy-profile",
+      tracking_tier: "observed",
+      max_position_roi_percent: 750,
+    },
+  ];
+  const row = (service as any)
+    .loadTrackedWalletRows()
+    .find((candidate: any) => candidate.wallet === wallet);
+  assert.equal(row, undefined);
+});
+test("mixed Fomo token responses route each network independently", () => {
+  assert.equal(fomoChain(1399811149), "sol");
+  assert.equal(fomoChain(56), "bsc");
+  assert.equal(fomoChain(8453), "base");
+  assert.equal(fomoChain(4663), "robinhood");
+  assert.equal(fomoChain(1), "eth");
+  assert.equal(fomoChain(1337), undefined);
+});
+test("Fomo-native trade gate enforces a 200 percent high-quality return floor", () => {
+  const cfg = {
+      min_roi_30d: 2,
+      min_win_rate_30d: 0.4,
+      min_median_buy_usd: 50,
+      max_unique_tokens_in_100_actions: 60,
+    },
+    win = (i: number) => ({
+      trade: {
+        id: String(i),
+        closedAt: new Date().toISOString(),
+        realizedPnlUsd: 600,
+        totalCostBasis: 200,
+        networkId: 1399811149,
+        tokenAddress: `token${i}`,
+      },
+    }),
+    loss = (i: number) => ({
+      trade: {
+        id: String(i),
+        closedAt: new Date().toISOString(),
+        realizedPnlUsd: -50,
+        totalCostBasis: 200,
+        networkId: 1399811149,
+        tokenAddress: `loss${i}`,
+      },
+    });
+  assert.equal(
+    fomoTradeGate(
+      {
+        closedTrades: [
+          ...Array.from({ length: 8 }, (_, i) => win(i)),
+          ...Array.from({ length: 2 }, (_, i) => loss(i)),
+        ],
+        activeTrades: [],
+      },
+      cfg,
+    ).passed,
+    true,
+  );
+  assert.equal(
+    fomoTradeGate(
+      {
+        closedTrades: [
+          ...Array.from({ length: 8 }, (_, i) => ({
+            ...win(i),
+            trade: { ...win(i).trade, realizedPnlUsd: 100 },
+          })),
+          ...Array.from({ length: 2 }, (_, i) => loss(i)),
+        ],
+        activeTrades: [],
+      },
+      cfg,
+    ).passed,
+    false,
+  );
+});
+
+test("browser-refreshed Fomo token safely supersedes the static env token", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fomo-token-test-")),
+    path = join(dir, "token.json"),
+    now = Math.floor(Date.now() / 1000),
+    env = fakeToken(now + 600),
+    fresh = fakeToken(now + 3600);
+  try {
+    assert.equal(isUsableFomoToken(fakeToken(now + 3600, "not-privy")), false);
+    assert.equal(saveFomoToken(path, fresh), true);
+    assert.equal(readStoredFomoToken(path), fresh);
+    assert.equal(selectFomoToken(env, path), fresh);
+    assert.equal(selectFomoToken(env, path, fresh), env);
+    assert.equal(saveFomoToken(path, fresh), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -13,8 +13,6 @@ services:
         value: production
       - key: HOST
         value: 0.0.0.0
-      - key: FOMO_BROWSER_SESSION
-        value: "false"
       - key: DAILY_WALLET_REFRESH_ENABLED
         value: "false"
       - key: MONGO_ROSTER_RELOAD_MS
@@ -30,8 +28,6 @@ services:
       - key: GMGN_API_KEY
         sync: false
       - key: GMGN_PRIVATE_KEY
-        sync: false
-      - key: FOMO_TOKEN
         sync: false
       - key: TWITTER_TOKEN
         sync: false

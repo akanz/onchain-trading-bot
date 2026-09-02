@@ -4,67 +4,535 @@ import { loadEnvFile } from "node:process";
 import { DATA_ROOT, loadConfig, ROOT } from "../src/config.js";
 import { connectMongo, TrackedWalletRepository } from "../src/mongo.js";
 import { FomoClient, fomoChain } from "../src/fomo/client.js";
-import { fomoProfileInsights, fomoTradeGate, gmgnProfitGate, passesFomoProfile } from "../src/fomo/analysis.js";
+import {
+  fomoProfileInsights,
+  fomoTradeGate,
+  gmgnProfitGate,
+  passesFomoProfile,
+} from "../src/fomo/analysis.js";
 import { GmgnClient, isRateLimit } from "../src/gmgn.js";
 import { number } from "../src/scoring.js";
 import { buildFomoTrackedWallets } from "../src/fomo/tracking.js";
 import { historicalMarketCap } from "../src/market-cap.js";
 import type { Chain, Json } from "../src/types.js";
 
-const envPath=join(ROOT,".env");if(existsSync(envPath))loadEnvFile(envPath);
-const config=loadConfig(),fomo=new FomoClient(),now=new Date(),stamp=now.toISOString().slice(0,10);
-if(!fomo.enabled)throw new Error("FOMO_TOKEN is not configured");
-const useGmgn=process.env.FOMO_GMGN_VALIDATION==="true",gmgn=useGmgn?new GmgnClient():undefined;
-if(gmgn)await gmgn.checkConfig();
-const [tokens,leaderboards]=await Promise.all([fomo.discover(),fomo.leaderboards()]),leaderboard=leaderboards.profiles;
-const minimumTrendingAthMarketCap=Number(process.env.FOMO_TRENDING_WALLET_MIN_ATH_MARKET_CAP_USD??1_000_000);
-if(gmgn)await mapLimit(tokens.filter(token=>token.sources.has("fomo_trending")),1,async token=>{try{const info=await gmgn.tokenInfo(token.chain,token.address),ath=historicalMarketCap(info);token.athMarketCap=Math.max(Number(token.marketCap??0),Number(token.athMarketCap??0),Number(ath??0));token.athMarketCapSource=ath?"gmgn_token_info":token.athMarketCapSource??"fomo_observed_peak";}catch(error){if(isRateLimit(error))throw error;token.athMarketCap=Math.max(Number(token.marketCap??0),Number(token.athMarketCap??0));token.athMarketCapSource=token.athMarketCapSource??"fomo_observed_peak";console.warn(`Could not enrich ATH market cap for ${token.chain}:${token.address}`,String(error));}});
-else for(const token of tokens){token.athMarketCap=Math.max(Number(token.marketCap??0),Number(token.athMarketCap??0));token.athMarketCapSource=token.athMarketCapSource??"fomo_observed_peak";}
-const sanitizedTokens=tokens.map(token=>({chain:token.chain,address:token.address,symbol:token.token?.symbol,sources:[...token.sources],market_cap:Number(token.marketCap??0),ath_market_cap:historicalMarketCap(token),ath_market_cap_source:token.athMarketCapSource,liquidity:Number(token.liquidity??0),volume_24h:Number(token.volume24??0),change_24h_percent:Number(token.change24??0)*100,eligible_holders:token.holders.map(holder=>({wallet:holder.wallet,handle:holder.user?.userHandle,roi_percent:holder.roiPercent,realized_roi_percent:holder.realizedRoiPercent,unrealized_roi_percent:holder.unrealizedRoiPercent,cost_basis:Number(holder.costBasis),value:Number(holder.value),pnl:Number(holder.pnl),realized_pnl:Number(holder.realizedPnl),unrealized_pnl:Number(holder.unrealizedPnl),hold_seconds:Number(holder.averageHoldTimeSeconds??0)}))}));
-const sourceCounts=(source:"fomo_most_held"|"fomo_trending")=>{const rows=sanitizedTokens.filter(token=>token.sources.includes(source)),holders=rows.flatMap(token=>token.eligible_holders);return {tokens:rows.length,holder_positions:holders.length,unique_wallets:new Set(holders.map(holder=>holder.wallet)).size};};
-const mostHeldCounts=sourceCounts("fomo_most_held"),trendingCounts=sourceCounts("fomo_trending");
-const leaderboardProfiles=leaderboard.filter(passesFomoProfile),profileById=new Map<string,Json>();
-for(const profile of leaderboardProfiles)profileById.set(String(profile.id),{...profile,topHoldings:profile.topHoldings??[],discovery_sources:["fomo_leaderboard"],qualifying_positions:[]});
-for(const token of tokens)for(const holder of token.holders){
-  const user:Json=holder.user??{},id=String(user.id??"");if(!id)continue;
-  const current=profileById.get(id)??{...user,topHoldings:[],discovery_sources:[],qualifying_positions:[]};
-  for(const source of token.sources)if(!current.discovery_sources.includes(source))current.discovery_sources.push(source);
-  const position={networkId:token.networkId,tokenAddress:token.address,symbol:token.token?.symbol,value:Number(holder.value),pnl:Number(holder.pnl),realizedPnl:Number(holder.realizedPnl),unrealizedPnl:Number(holder.unrealizedPnl),costBasis:Number(holder.costBasis),roiPercent:holder.roiPercent,realizedRoiPercent:holder.realizedRoiPercent,unrealizedRoiPercent:holder.unrealizedRoiPercent};
-  if(!current.qualifying_positions.some((row:Json)=>row.networkId===position.networkId&&row.tokenAddress===position.tokenAddress))current.qualifying_positions.push(position);
-  if(!current.topHoldings.some((row:Json)=>row.networkId===position.networkId&&(row.tokenAddress??row.address)===position.tokenAddress))current.topHoldings.push(position);
-  profileById.set(id,current);
+const envPath = join(ROOT, ".env");
+if (existsSync(envPath)) loadEnvFile(envPath);
+const config = loadConfig(),
+  fomo = new FomoClient(),
+  now = new Date(),
+  stamp = now.toISOString().slice(0, 10);
+if (!fomo.enabled) throw new Error("FOMO_TOKEN is not configured");
+const useGmgn = process.env.FOMO_GMGN_VALIDATION === "true",
+  gmgn = useGmgn ? new GmgnClient() : undefined;
+if (gmgn) await gmgn.checkConfig();
+const [tokens, leaderboards] = await Promise.all([fomo.discover(), fomo.leaderboards()]),
+  leaderboard = leaderboards.profiles;
+const minimumTrendingAthMarketCap = Number(
+  process.env.FOMO_TRENDING_WALLET_MIN_ATH_MARKET_CAP_USD ?? 1_000_000,
+);
+if (gmgn)
+  await mapLimit(
+    tokens.filter((token) => token.sources.has("fomo_trending")),
+    1,
+    async (token) => {
+      try {
+        const info = await gmgn.tokenInfo(token.chain, token.address),
+          ath = historicalMarketCap(info);
+        token.athMarketCap = Math.max(
+          Number(token.marketCap ?? 0),
+          Number(token.athMarketCap ?? 0),
+          Number(ath ?? 0),
+        );
+        token.athMarketCapSource = ath
+          ? "gmgn_token_info"
+          : (token.athMarketCapSource ?? "fomo_observed_peak");
+      } catch (error) {
+        if (isRateLimit(error)) throw error;
+        token.athMarketCap = Math.max(
+          Number(token.marketCap ?? 0),
+          Number(token.athMarketCap ?? 0),
+        );
+        token.athMarketCapSource = token.athMarketCapSource ?? "fomo_observed_peak";
+        console.warn(
+          `Could not enrich ATH market cap for ${token.chain}:${token.address}`,
+          String(error),
+        );
+      }
+    },
+  );
+else
+  for (const token of tokens) {
+    token.athMarketCap = Math.max(Number(token.marketCap ?? 0), Number(token.athMarketCap ?? 0));
+    token.athMarketCapSource = token.athMarketCapSource ?? "fomo_observed_peak";
+  }
+const sanitizedTokens = tokens.map((token) => ({
+  chain: token.chain,
+  address: token.address,
+  symbol: token.token?.symbol,
+  sources: [...token.sources],
+  market_cap: Number(token.marketCap ?? 0),
+  ath_market_cap: historicalMarketCap(token),
+  ath_market_cap_source: token.athMarketCapSource,
+  liquidity: Number(token.liquidity ?? 0),
+  volume_24h: Number(token.volume24 ?? 0),
+  change_24h_percent: Number(token.change24 ?? 0) * 100,
+  eligible_holders: token.holders.map((holder) => ({
+    wallet: holder.wallet,
+    handle: holder.user?.userHandle,
+    roi_percent: holder.roiPercent,
+    realized_roi_percent: holder.realizedRoiPercent,
+    unrealized_roi_percent: holder.unrealizedRoiPercent,
+    cost_basis: Number(holder.costBasis),
+    value: Number(holder.value),
+    pnl: Number(holder.pnl),
+    realized_pnl: Number(holder.realizedPnl),
+    unrealized_pnl: Number(holder.unrealizedPnl),
+    hold_seconds: Number(holder.averageHoldTimeSeconds ?? 0),
+  })),
+}));
+const sourceCounts = (source: "fomo_most_held" | "fomo_trending") => {
+  const rows = sanitizedTokens.filter((token) => token.sources.includes(source)),
+    holders = rows.flatMap((token) => token.eligible_holders);
+  return {
+    tokens: rows.length,
+    holder_positions: holders.length,
+    unique_wallets: new Set(holders.map((holder) => holder.wallet)).size,
+  };
+};
+const mostHeldCounts = sourceCounts("fomo_most_held"),
+  trendingCounts = sourceCounts("fomo_trending");
+const leaderboardProfiles = leaderboard.filter(passesFomoProfile),
+  profileById = new Map<string, Json>();
+for (const profile of leaderboardProfiles)
+  profileById.set(String(profile.id), {
+    ...profile,
+    topHoldings: profile.topHoldings ?? [],
+    discovery_sources: ["fomo_leaderboard"],
+    qualifying_positions: [],
+  });
+for (const token of tokens)
+  for (const holder of token.holders) {
+    const user: Json = holder.user ?? {},
+      id = String(user.id ?? "");
+    if (!id) continue;
+    const current = profileById.get(id) ?? {
+      ...user,
+      topHoldings: [],
+      discovery_sources: [],
+      qualifying_positions: [],
+    };
+    for (const source of token.sources)
+      if (!current.discovery_sources.includes(source)) current.discovery_sources.push(source);
+    const position = {
+      networkId: token.networkId,
+      tokenAddress: token.address,
+      symbol: token.token?.symbol,
+      value: Number(holder.value),
+      pnl: Number(holder.pnl),
+      realizedPnl: Number(holder.realizedPnl),
+      unrealizedPnl: Number(holder.unrealizedPnl),
+      costBasis: Number(holder.costBasis),
+      roiPercent: holder.roiPercent,
+      realizedRoiPercent: holder.realizedRoiPercent,
+      unrealizedRoiPercent: holder.unrealizedRoiPercent,
+    };
+    if (
+      !current.qualifying_positions.some(
+        (row: Json) =>
+          row.networkId === position.networkId && row.tokenAddress === position.tokenAddress,
+      )
+    )
+      current.qualifying_positions.push(position);
+    if (
+      !current.topHoldings.some(
+        (row: Json) =>
+          row.networkId === position.networkId &&
+          (row.tokenAddress ?? row.address) === position.tokenAddress,
+      )
+    )
+      current.topHoldings.push(position);
+    profileById.set(id, current);
+  }
+const profiles: Json[] = [...profileById.values()].map((profile) => ({
+  ...profile,
+  insights: fomoProfileInsights(profile),
+}));
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const output = new Array<R>(items.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      output[index] = await fn(items[index]!);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return output;
 }
-const profiles:Json[]=[...profileById.values()].map(profile=>({...profile,insights:fomoProfileInsights(profile)}));
-async function mapLimit<T,R>(items:T[],limit:number,fn:(item:T)=>Promise<R>):Promise<R[]>{const output=new Array<R>(items.length);let next=0;async function worker(){while(true){const index=next++;if(index>=items.length)return;output[index]=await fn(items[index]!);}}await Promise.all(Array.from({length:Math.min(limit,items.length)},worker));return output;}
-const nativeProfiles:Json[]=await mapLimit<Json,Json>(profiles,4,async profile=>{try{const trades=await fomo.userTrades(profile.id),gate=fomoTradeGate(trades,config.wallet);return {...profile,native_gate:gate};}catch(error){console.warn(`Could not fetch Fomo trades for ${profile.userHandle}`,String(error));return {...profile,native_gate:{passed:false,error:String(error)}};}}),nativeById=new Map(nativeProfiles.map(profile=>[profile.id,profile]));
-const candidates=new Map<string,Json>();
-for(const original of nativeProfiles){const profile=nativeById.get(original.id)!;for(const holding of profile.topHoldings??[]){const chain=fomoChain(holding.networkId);if(!chain||!config.enabled_chains.includes(chain))continue;const wallet=chain==="sol"?profile.address:profile.evmAddress;if(!wallet)continue;const key=`${chain}:${wallet}`,current=candidates.get(key)??{chain,wallet,profile,networks:new Set<string>(),holdings:[]};current.networks.add(chain);current.holdings.push(holding);candidates.set(key,current);}}
-for(const profile of nativeProfiles.filter(row=>row.native_gate.passed)){for(const chain of config.enabled_chains){const wallet=chain==="sol"?profile.address:profile.evmAddress;if(!wallet)continue;const key=`${chain}:${wallet}`;if(!candidates.has(key))candidates.set(key,{chain,wallet,profile,networks:new Set<string>([chain]),holdings:[]});}}
+const nativeProfiles: Json[] = await mapLimit<Json, Json>(profiles, 4, async (profile) => {
+    try {
+      const trades = await fomo.userTrades(profile.id),
+        gate = fomoTradeGate(trades, config.wallet);
+      return { ...profile, native_gate: gate };
+    } catch (error) {
+      console.warn(`Could not fetch Fomo trades for ${profile.userHandle}`, String(error));
+      return { ...profile, native_gate: { passed: false, error: String(error) } };
+    }
+  }),
+  nativeById = new Map(nativeProfiles.map((profile) => [profile.id, profile]));
+const candidates = new Map<string, Json>();
+for (const original of nativeProfiles) {
+  const profile = nativeById.get(original.id)!;
+  for (const holding of profile.topHoldings ?? []) {
+    const chain = fomoChain(holding.networkId);
+    if (!chain || !config.enabled_chains.includes(chain)) continue;
+    const wallet = chain === "sol" ? profile.address : profile.evmAddress;
+    if (!wallet) continue;
+    const key = `${chain}:${wallet}`,
+      current = candidates.get(key) ?? {
+        chain,
+        wallet,
+        profile,
+        networks: new Set<string>(),
+        holdings: [],
+      };
+    current.networks.add(chain);
+    current.holdings.push(holding);
+    candidates.set(key, current);
+  }
+}
+for (const profile of nativeProfiles.filter((row) => row.native_gate.passed)) {
+  for (const chain of config.enabled_chains) {
+    const wallet = chain === "sol" ? profile.address : profile.evmAddress;
+    if (!wallet) continue;
+    const key = `${chain}:${wallet}`;
+    if (!candidates.has(key))
+      candidates.set(key, {
+        chain,
+        wallet,
+        profile,
+        networks: new Set<string>([chain]),
+        holdings: [],
+      });
+  }
+}
 
-const profitRows=new Map<string,Record<string,Json>>();
-if(gmgn)for(const chain of config.enabled_chains){const rows=[...candidates.values()].filter(row=>row.chain===chain),wallets=rows.map(row=>row.wallet);if(!wallets.length)continue;for(const period of ["7d","30d","all"] as const){for(let offset=0;offset<wallets.length;offset+=100){for(const row of await gmgn.walletProfits(chain,wallets.slice(offset,offset+100),period)){const key=`${chain}:${row.wallet_address}`,entry=profitRows.get(key)??{};entry[period]=row;profitRows.set(key,entry);}}}}
-const profitable:Json[]=[];
-for(const candidate of candidates.values()){
-  const rows=profitRows.get(`${candidate.chain}:${candidate.wallet}`)??{};if(!rows["7d"]||!rows["30d"]||!rows.all)continue;
-  const rp7=Number(rows["7d"].realized_profit??0),rp30=Number(rows["30d"].realized_profit??0),rpall=Number(rows.all.total_realized_profit??rows.all.realized_profit??0),cost30=Math.max(Number(rows["30d"].realized_profit_cost??0),1),costAll=Math.max(Number(rows.all.total_realized_profit_cost??rows.all.realized_profit_cost??0),1),trades30=Number(rows["30d"].buy??0)+Number(rows["30d"].sell??0);
-  if(rp7<config.wallet.min_realized_profit_7d||rp30<config.wallet.min_realized_profit_30d||rpall<config.wallet.min_realized_profit_all||rp30/cost30<config.wallet.min_roi_30d||rpall/costAll<config.wallet.min_roi_all||trades30<config.wallet.min_trades_30d||trades30>config.wallet.max_trades_30d)continue;
-  try {const stats=await gmgn!.walletStats(candidate.chain,candidate.wallet),gate=gmgnProfitGate(rows["7d"],rows["30d"],rows.all,stats,config.wallet);if(gate.passed)profitable.push({...candidate,...candidate.profile.insights,...gate,stats});}
-  catch(error){if(isRateLimit(error))throw error;console.warn(`Could not profile ${candidate.chain}:${candidate.wallet}`,String(error));}
+const profitRows = new Map<string, Record<string, Json>>();
+if (gmgn)
+  for (const chain of config.enabled_chains) {
+    const rows = [...candidates.values()].filter((row) => row.chain === chain),
+      wallets = rows.map((row) => row.wallet);
+    if (!wallets.length) continue;
+    for (const period of ["7d", "30d", "all"] as const) {
+      for (let offset = 0; offset < wallets.length; offset += 100) {
+        for (const row of await gmgn.walletProfits(
+          chain,
+          wallets.slice(offset, offset + 100),
+          period,
+        )) {
+          const key = `${chain}:${row.wallet_address}`,
+            entry = profitRows.get(key) ?? {};
+          entry[period] = row;
+          profitRows.set(key, entry);
+        }
+      }
+    }
+  }
+const profitable: Json[] = [];
+for (const candidate of candidates.values()) {
+  const rows = profitRows.get(`${candidate.chain}:${candidate.wallet}`) ?? {};
+  if (!rows["7d"] || !rows["30d"] || !rows.all) continue;
+  const rp7 = Number(rows["7d"].realized_profit ?? 0),
+    rp30 = Number(rows["30d"].realized_profit ?? 0),
+    rpall = Number(rows.all.total_realized_profit ?? rows.all.realized_profit ?? 0),
+    cost30 = Math.max(Number(rows["30d"].realized_profit_cost ?? 0), 1),
+    costAll = Math.max(
+      Number(rows.all.total_realized_profit_cost ?? rows.all.realized_profit_cost ?? 0),
+      1,
+    ),
+    trades30 = Number(rows["30d"].buy ?? 0) + Number(rows["30d"].sell ?? 0);
+  if (
+    rp7 < config.wallet.min_realized_profit_7d ||
+    rp30 < config.wallet.min_realized_profit_30d ||
+    rpall < config.wallet.min_realized_profit_all ||
+    rp30 / cost30 < config.wallet.min_roi_30d ||
+    rpall / costAll < config.wallet.min_roi_all ||
+    trades30 < config.wallet.min_trades_30d ||
+    trades30 > config.wallet.max_trades_30d
+  )
+    continue;
+  try {
+    const stats = await gmgn!.walletStats(candidate.chain, candidate.wallet),
+      gate = gmgnProfitGate(rows["7d"], rows["30d"], rows.all, stats, config.wallet);
+    if (gate.passed)
+      profitable.push({ ...candidate, ...candidate.profile.insights, ...gate, stats });
+  } catch (error) {
+    if (isRateLimit(error)) throw error;
+    console.warn(`Could not profile ${candidate.chain}:${candidate.wallet}`, String(error));
+  }
 }
-const qualified:Json[]=[];
-for(const candidate of profitable){try{const activity=await gmgn!.walletActivity(candidate.chain,candidate.wallet,100),buys=activity.filter(row=>(row.event_type??row.type)==="buy"),unique=new Set(activity.map(row=>row.token?.address).filter(Boolean)),sizes=buys.map(row=>number(row.cost_usd,0)??0).sort((a,b)=>a-b),median=sizes.length?(sizes.length%2?sizes[(sizes.length-1)/2]!:(sizes[sizes.length/2-1]!+sizes[sizes.length/2]!)/2):0;if(activity.length&&unique.size<=config.wallet.max_unique_tokens_in_100_actions&&median>=config.wallet.min_median_buy_usd)qualified.push({...candidate,unique_tokens_in_sample:unique.size,median_buy_usd:median,funder:candidate.stats.common?.fund_from_address||null,verification_source:"gmgn"});}catch(error){if(isRateLimit(error))throw error;}}
-for(const candidate of candidates.values())if(candidate.profile.native_gate?.passed&&!qualified.some(row=>row.chain===candidate.chain&&row.wallet===candidate.wallet))qualified.push({...candidate,...candidate.profile.insights,...candidate.profile.native_gate,median_buy_usd:candidate.profile.native_gate.native_median_cost_usd,funder:null,verification_source:"fomo_native"});
-const seenFunders=new Set<string>(),deduped=qualified.sort((a,b)=>(b.native_wilson_sample??b.wilson??0)-(a.native_wilson_sample??a.wilson??0)||(b.native_realized_pnl_sample??b.rp30??0)-(a.native_realized_pnl_sample??a.rp30??0)).filter(row=>{const identity=`${row.chain}:${row.funder||`wallet:${row.wallet}`}`;if(seenFunders.has(identity))return false;seenFunders.add(identity);return true;}).map(row=>{
-  const positions:Json[]=row.profile.qualifying_positions??[],max=(field:string)=>positions.length?Math.max(...positions.map(position=>Number(position[field]??0))):undefined;
-  return {chain:row.chain,wallet:row.wallet,fomo_handle:row.profile.userHandle,fomo_user_id:row.profile.id,verification_source:row.verification_source,discovery_sources:row.profile.discovery_sources??[],qualifying_position_count:positions.length,max_position_roi_percent:max("roiPercent"),max_realized_position_roi_percent:max("realizedRoiPercent"),max_unrealized_position_roi_percent:max("unrealizedRoiPercent"),leaderboard_periods:row.leaderboard_periods??[],leaderboard_ranks:row.leaderboard_ranks??{},fomo_total_pnl:row.fomo_total_pnl,fomo_pnl_24h:row.fomo_pnl_24h,fomo_pnl_7d:row.fomo_pnl_7d,fomo_pnl_30d:row.fomo_pnl_30d,fomo_leaderboard_pnl:row.fomo_leaderboard_pnl,fomo_pnl_efficiency:row.fomo_pnl_efficiency,profitable_top_holding_rate:row.profitable_top_holding_rate,network_count:row.network_count,rp7:row.rp7,rp30:row.rp30,rpall:row.rpall,roi30:row.roi30??row.native_roi_sample,roi_all:row.roiAll,winrate_30d:row.winrate,winrate_closed_sample:row.native_winrate_sample,wilson_30d:row.wilson,wilson_closed_sample:row.native_wilson_sample,trades_30d:row.trades30,closed_trade_sample:row.closed_trade_sample,closed_trade_total:row.closed_trade_total,closed_trade_sample_complete:row.closed_trade_sample_complete,token_count_30d:row.tokenCount,median_buy_usd:row.median_buy_usd,realized_pnl_closed_sample:row.native_realized_pnl_sample,cost_closed_sample:row.native_cost_sample,roi_closed_sample:row.native_roi_sample,native_active_tokens:row.native_active_tokens,funder:row.funder};
-});
-const minimumPositionRoi=Number(process.env.FOMO_MIN_POSITION_ROI_PERCENT??500);
-const trackedByWallet=new Map<string,Json>(buildFomoTrackedWallets(leaderboard,tokens,config.enabled_chains,minimumTrendingAthMarketCap).map(row=>[`${row.chain}:${row.wallet}`,row]));
-for(const row of deduped){const key=`${row.chain}:${row.wallet}`,observed=trackedByWallet.get(key);trackedByWallet.set(key,{...(observed??{}),...row,tracking_tier:"qualified",discovery_sources:[...new Set([...(observed?.discovery_sources??[]),...(row.discovery_sources??[])])]});}
-const trackedWallets=[...trackedByWallet.values()];
-const leaderboardCounts=Object.fromEntries(Object.entries(leaderboards.byPeriod).map(([period,rows])=>[period,rows.length]));
-const holderProfileIds=new Set(tokens.flatMap(token=>token.holders.map(holder=>String(holder.user?.id??"")).filter(Boolean)));
-const nativePassed=nativeProfiles.filter(row=>row.native_gate.passed);
-const report={generated_at:now.toISOString(),definition:{leaderboard_size:leaderboard.length,leaderboard_periods:["24h","7d","30d"],leaderboard_counts:leaderboardCounts,position_roi_filter:`>= ${minimumPositionRoi}% total, realized, or unrealized position PnL`,elite_leaderboard_profit_filter_usd:Number(process.env.FOMO_ELITE_MIN_LEADERBOARD_PNL_USD??100_000),trending_wallet_min_ath_market_cap_usd:minimumTrendingAthMarketCap,current_market_cap_is_not_a_discovery_floor:true,final_profit_filter:"realized PnL from closed trades",notes:"Every public Fomo leaderboard profile remains in the research output. Live monitoring includes the elite_observed tier: profiles with >=500% total, realized, or unrealized position ROI, plus leaderboard traders with at least the configured elite absolute profit. GMGN token info enriches Fomo rows with ATH price and supply, so retraced tokens remain eligible regardless of current market cap. Closed-trade realized PnL, ROI, Wilson win rate, position-size, and active-token breadth gates separately upgrade wallets to the qualified high-confidence tier."},counts:{most_held_and_trending_tokens:tokens.length,eligible_token_holders:sanitizedTokens.reduce((sum,row)=>sum+row.eligible_holders.length,0),most_held_tokens:mostHeldCounts.tokens,most_held_holder_positions:mostHeldCounts.holder_positions,most_held_unique_wallets:mostHeldCounts.unique_wallets,trending_tokens:trendingCounts.tokens,trending_holder_positions:trendingCounts.holder_positions,trending_unique_wallets:trendingCounts.unique_wallets,trending_ath_above_floor:sanitizedTokens.filter(row=>row.sources.includes("fomo_trending")&&Number(row.ath_market_cap)>=minimumTrendingAthMarketCap).length,trending_retraced_below_floor:sanitizedTokens.filter(row=>row.sources.includes("fomo_trending")&&Number(row.market_cap)<minimumTrendingAthMarketCap&&Number(row.ath_market_cap)>=minimumTrendingAthMarketCap).length,leaderboard_24h:leaderboards.byPeriod["24h"].length,leaderboard_7d:leaderboards.byPeriod["7d"].length,leaderboard_30d:leaderboards.byPeriod["30d"].length,leaderboard_unique_profiles:leaderboard.length,leaderboard_prefilter_profiles:leaderboardProfiles.length,holder_discovery_profiles:holderProfileIds.size,deep_gate_profiles:profiles.length,fomo_native_trade_passes:nativePassed.length,native_passes_from_leaderboard:nativePassed.filter(row=>row.discovery_sources?.includes("fomo_leaderboard")).length,native_passes_from_most_held:nativePassed.filter(row=>row.discovery_sources?.includes("fomo_most_held")).length,native_passes_from_trending:nativePassed.filter(row=>row.discovery_sources?.includes("fomo_trending")).length,gmgn_validated_wallets:qualified.filter(row=>row.verification_source==="gmgn").length,observed_profiles:new Set(trackedWallets.map(row=>row.fomo_user_id)).size,elite_observed_wallets:trackedWallets.filter(row=>row.tracking_tier==="elite_observed").length,tracked_wallets:trackedWallets.filter(row=>row.tracking_tier!=="observed").length,qualified_wallets:deduped.length},tokens:sanitizedTokens,profile_insights:nativeProfiles.map((row:Json)=>({id:row.id,handle:row.userHandle,address:row.address,evm_address:row.evmAddress,discovery_sources:row.discovery_sources,qualifying_position_count:row.qualifying_positions?.length??0,...row.insights,...row.native_gate})),tracked_wallets:trackedWallets,qualified_wallets:deduped};
-const reportDir=join(DATA_ROOT,"reports"),dataDir=join(DATA_ROOT,"fomo","data");mkdirSync(reportDir,{recursive:true});mkdirSync(dataDir,{recursive:true});writeFileSync(join(reportDir,`fomo-wallet-scan-${stamp}.json`),JSON.stringify(report,null,2));writeFileSync(join(dataDir,"qualified-wallets.json"),JSON.stringify({generated_at:report.generated_at,tracked_wallets:trackedWallets,qualified_wallets:deduped},null,2));console.log(JSON.stringify({report:`reports/fomo-wallet-scan-${stamp}.json`,counts:report.counts,tracked_by_chain:Object.fromEntries(config.enabled_chains.map(chain=>[chain,trackedWallets.filter(row=>row.chain===chain).length])),qualified_by_chain:Object.fromEntries(config.enabled_chains.map(chain=>[chain,deduped.filter(row=>row.chain===chain).length]))},null,2));
-const mongo=await connectMongo(false);if(mongo){try{await new TrackedWalletRepository(mongo).replace("fomo",report.generated_at,trackedWallets);}finally{await mongo.close();}}
+const qualified: Json[] = [];
+for (const candidate of profitable) {
+  try {
+    const activity = await gmgn!.walletActivity(candidate.chain, candidate.wallet, 100),
+      buys = activity.filter((row) => (row.event_type ?? row.type) === "buy"),
+      unique = new Set(activity.map((row) => row.token?.address).filter(Boolean)),
+      sizes = buys.map((row) => number(row.cost_usd, 0) ?? 0).sort((a, b) => a - b),
+      median = sizes.length
+        ? sizes.length % 2
+          ? sizes[(sizes.length - 1) / 2]!
+          : (sizes[sizes.length / 2 - 1]! + sizes[sizes.length / 2]!) / 2
+        : 0;
+    if (
+      activity.length &&
+      unique.size <= config.wallet.max_unique_tokens_in_100_actions &&
+      median >= config.wallet.min_median_buy_usd
+    )
+      qualified.push({
+        ...candidate,
+        unique_tokens_in_sample: unique.size,
+        median_buy_usd: median,
+        funder: candidate.stats.common?.fund_from_address || null,
+        verification_source: "gmgn",
+      });
+  } catch (error) {
+    if (isRateLimit(error)) throw error;
+  }
+}
+for (const candidate of candidates.values())
+  if (
+    candidate.profile.native_gate?.passed &&
+    !qualified.some((row) => row.chain === candidate.chain && row.wallet === candidate.wallet)
+  )
+    qualified.push({
+      ...candidate,
+      ...candidate.profile.insights,
+      ...candidate.profile.native_gate,
+      median_buy_usd: candidate.profile.native_gate.native_median_cost_usd,
+      funder: null,
+      verification_source: "fomo_native",
+    });
+const seenFunders = new Set<string>(),
+  deduped = qualified
+    .sort(
+      (a, b) =>
+        (b.native_wilson_sample ?? b.wilson ?? 0) - (a.native_wilson_sample ?? a.wilson ?? 0) ||
+        (b.native_realized_pnl_sample ?? b.rp30 ?? 0) -
+          (a.native_realized_pnl_sample ?? a.rp30 ?? 0),
+    )
+    .filter((row) => {
+      const identity = `${row.chain}:${row.funder || `wallet:${row.wallet}`}`;
+      if (seenFunders.has(identity)) return false;
+      seenFunders.add(identity);
+      return true;
+    })
+    .map((row) => {
+      const positions: Json[] = row.profile.qualifying_positions ?? [],
+        max = (field: string) =>
+          positions.length
+            ? Math.max(...positions.map((position) => Number(position[field] ?? 0)))
+            : undefined;
+      return {
+        chain: row.chain,
+        wallet: row.wallet,
+        fomo_handle: row.profile.userHandle,
+        fomo_user_id: row.profile.id,
+        verification_source: row.verification_source,
+        discovery_sources: row.profile.discovery_sources ?? [],
+        qualifying_position_count: positions.length,
+        max_position_roi_percent: max("roiPercent"),
+        max_realized_position_roi_percent: max("realizedRoiPercent"),
+        max_unrealized_position_roi_percent: max("unrealizedRoiPercent"),
+        leaderboard_periods: row.leaderboard_periods ?? [],
+        leaderboard_ranks: row.leaderboard_ranks ?? {},
+        fomo_total_pnl: row.fomo_total_pnl,
+        fomo_pnl_24h: row.fomo_pnl_24h,
+        fomo_pnl_7d: row.fomo_pnl_7d,
+        fomo_pnl_30d: row.fomo_pnl_30d,
+        fomo_leaderboard_pnl: row.fomo_leaderboard_pnl,
+        fomo_pnl_efficiency: row.fomo_pnl_efficiency,
+        profitable_top_holding_rate: row.profitable_top_holding_rate,
+        network_count: row.network_count,
+        rp7: row.rp7,
+        rp30: row.rp30,
+        rpall: row.rpall,
+        roi30: row.roi30 ?? row.native_roi_sample,
+        roi_all: row.roiAll,
+        winrate_30d: row.winrate,
+        winrate_closed_sample: row.native_winrate_sample,
+        wilson_30d: row.wilson,
+        wilson_closed_sample: row.native_wilson_sample,
+        trades_30d: row.trades30,
+        closed_trade_sample: row.closed_trade_sample,
+        closed_trade_total: row.closed_trade_total,
+        closed_trade_sample_complete: row.closed_trade_sample_complete,
+        token_count_30d: row.tokenCount,
+        median_buy_usd: row.median_buy_usd,
+        realized_pnl_closed_sample: row.native_realized_pnl_sample,
+        cost_closed_sample: row.native_cost_sample,
+        roi_closed_sample: row.native_roi_sample,
+        native_active_tokens: row.native_active_tokens,
+        funder: row.funder,
+      };
+    });
+const minimumPositionRoi = Number(process.env.FOMO_MIN_POSITION_ROI_PERCENT ?? 500);
+const trackedByWallet = new Map<string, Json>(
+  buildFomoTrackedWallets(
+    leaderboard,
+    tokens,
+    config.enabled_chains,
+    minimumTrendingAthMarketCap,
+  ).map((row) => [`${row.chain}:${row.wallet}`, row]),
+);
+for (const row of deduped) {
+  const key = `${row.chain}:${row.wallet}`,
+    observed = trackedByWallet.get(key);
+  trackedByWallet.set(key, {
+    ...(observed ?? {}),
+    ...row,
+    tracking_tier: "qualified",
+    discovery_sources: [
+      ...new Set([...(observed?.discovery_sources ?? []), ...(row.discovery_sources ?? [])]),
+    ],
+  });
+}
+const trackedWallets = [...trackedByWallet.values()];
+const leaderboardCounts = Object.fromEntries(
+  Object.entries(leaderboards.byPeriod).map(([period, rows]) => [period, rows.length]),
+);
+const holderProfileIds = new Set(
+  tokens.flatMap((token) =>
+    token.holders.map((holder) => String(holder.user?.id ?? "")).filter(Boolean),
+  ),
+);
+const nativePassed = nativeProfiles.filter((row) => row.native_gate.passed);
+const report = {
+  generated_at: now.toISOString(),
+  definition: {
+    leaderboard_size: leaderboard.length,
+    leaderboard_periods: ["24h", "7d", "30d"],
+    leaderboard_counts: leaderboardCounts,
+    position_roi_filter: `>= ${minimumPositionRoi}% total, realized, or unrealized position PnL`,
+    elite_leaderboard_profit_filter_usd: Number(
+      process.env.FOMO_ELITE_MIN_LEADERBOARD_PNL_USD ?? 100_000,
+    ),
+    trending_wallet_min_ath_market_cap_usd: minimumTrendingAthMarketCap,
+    current_market_cap_is_not_a_discovery_floor: true,
+    final_profit_filter: "realized PnL from closed trades",
+    notes:
+      "Every public Fomo leaderboard profile remains in the research output. Live monitoring includes the elite_observed tier: profiles with >=500% total, realized, or unrealized position ROI, plus leaderboard traders with at least the configured elite absolute profit. GMGN token info enriches Fomo rows with ATH price and supply, so retraced tokens remain eligible regardless of current market cap. Closed-trade realized PnL, ROI, Wilson win rate, position-size, and active-token breadth gates separately upgrade wallets to the qualified high-confidence tier.",
+  },
+  counts: {
+    most_held_and_trending_tokens: tokens.length,
+    eligible_token_holders: sanitizedTokens.reduce(
+      (sum, row) => sum + row.eligible_holders.length,
+      0,
+    ),
+    most_held_tokens: mostHeldCounts.tokens,
+    most_held_holder_positions: mostHeldCounts.holder_positions,
+    most_held_unique_wallets: mostHeldCounts.unique_wallets,
+    trending_tokens: trendingCounts.tokens,
+    trending_holder_positions: trendingCounts.holder_positions,
+    trending_unique_wallets: trendingCounts.unique_wallets,
+    trending_ath_above_floor: sanitizedTokens.filter(
+      (row) =>
+        row.sources.includes("fomo_trending") &&
+        Number(row.ath_market_cap) >= minimumTrendingAthMarketCap,
+    ).length,
+    trending_retraced_below_floor: sanitizedTokens.filter(
+      (row) =>
+        row.sources.includes("fomo_trending") &&
+        Number(row.market_cap) < minimumTrendingAthMarketCap &&
+        Number(row.ath_market_cap) >= minimumTrendingAthMarketCap,
+    ).length,
+    leaderboard_24h: leaderboards.byPeriod["24h"].length,
+    leaderboard_7d: leaderboards.byPeriod["7d"].length,
+    leaderboard_30d: leaderboards.byPeriod["30d"].length,
+    leaderboard_unique_profiles: leaderboard.length,
+    leaderboard_prefilter_profiles: leaderboardProfiles.length,
+    holder_discovery_profiles: holderProfileIds.size,
+    deep_gate_profiles: profiles.length,
+    fomo_native_trade_passes: nativePassed.length,
+    native_passes_from_leaderboard: nativePassed.filter((row) =>
+      row.discovery_sources?.includes("fomo_leaderboard"),
+    ).length,
+    native_passes_from_most_held: nativePassed.filter((row) =>
+      row.discovery_sources?.includes("fomo_most_held"),
+    ).length,
+    native_passes_from_trending: nativePassed.filter((row) =>
+      row.discovery_sources?.includes("fomo_trending"),
+    ).length,
+    gmgn_validated_wallets: qualified.filter((row) => row.verification_source === "gmgn").length,
+    observed_profiles: new Set(trackedWallets.map((row) => row.fomo_user_id)).size,
+    elite_observed_wallets: trackedWallets.filter((row) => row.tracking_tier === "elite_observed")
+      .length,
+    tracked_wallets: trackedWallets.filter((row) => row.tracking_tier !== "observed").length,
+    qualified_wallets: deduped.length,
+  },
+  tokens: sanitizedTokens,
+  profile_insights: nativeProfiles.map((row: Json) => ({
+    id: row.id,
+    handle: row.userHandle,
+    address: row.address,
+    evm_address: row.evmAddress,
+    discovery_sources: row.discovery_sources,
+    qualifying_position_count: row.qualifying_positions?.length ?? 0,
+    ...row.insights,
+    ...row.native_gate,
+  })),
+  tracked_wallets: trackedWallets,
+  qualified_wallets: deduped,
+};
+const reportDir = join(DATA_ROOT, "reports"),
+  dataDir = join(DATA_ROOT, "fomo", "data");
+mkdirSync(reportDir, { recursive: true });
+mkdirSync(dataDir, { recursive: true });
+writeFileSync(join(reportDir, `fomo-wallet-scan-${stamp}.json`), JSON.stringify(report, null, 2));
+writeFileSync(
+  join(dataDir, "qualified-wallets.json"),
+  JSON.stringify(
+    {
+      generated_at: report.generated_at,
+      tracked_wallets: trackedWallets,
+      qualified_wallets: deduped,
+    },
+    null,
+    2,
+  ),
+);
+console.log(
+  JSON.stringify(
+    {
+      report: `reports/fomo-wallet-scan-${stamp}.json`,
+      counts: report.counts,
+      tracked_by_chain: Object.fromEntries(
+        config.enabled_chains.map((chain) => [
+          chain,
+          trackedWallets.filter((row) => row.chain === chain).length,
+        ]),
+      ),
+      qualified_by_chain: Object.fromEntries(
+        config.enabled_chains.map((chain) => [
+          chain,
+          deduped.filter((row) => row.chain === chain).length,
+        ]),
+      ),
+    },
+    null,
+    2,
+  ),
+);
+const mongo = await connectMongo(false);
+if (mongo) {
+  try {
+    await new TrackedWalletRepository(mongo).replace("fomo", report.generated_at, trackedWallets);
+  } finally {
+    await mongo.close();
+  }
+}

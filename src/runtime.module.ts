@@ -4,5 +4,9 @@ import { DatabaseModule } from "./database.module.js";
 import { RuntimeService } from "./runtime.service.js";
 
 @Global()
-@Module({imports:[DatabaseModule],providers:[RuntimeService,AlertStream],exports:[RuntimeService,AlertStream]})
+@Module({
+  imports: [DatabaseModule],
+  providers: [RuntimeService, AlertStream],
+  exports: [RuntimeService, AlertStream],
+})
 export class RuntimeModule {}

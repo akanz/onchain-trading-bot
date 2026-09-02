@@ -19,11 +19,11 @@ export class AlertStream extends EventEmitter {
 }
 
 export function isDeliverableAlert(alert: Alert): boolean {
-  if(alert.kind==="MULTIPLE")return true;
+  if (alert.kind === "MULTIPLE") return true;
   const tiers = new Set(
     (process.env.ALERT_TIERS ?? "CALL,RESEARCH")
       .split(",")
-      .map(value => value.trim().toUpperCase())
+      .map((value) => value.trim().toUpperCase())
       .filter(Boolean),
   );
   return tiers.has(alert.tier);

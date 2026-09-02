@@ -7,8 +7,8 @@ export const ROOT = resolve(process.env.TRACKER_ROOT ?? process.cwd());
 export const DATA_ROOT = resolve(process.env.TRACKER_DATA_ROOT ?? ROOT);
 
 export function loadConfig(path = join(ROOT, "config.json")): TrackerConfig {
-  const config=JSON.parse(readFileSync(path, "utf8")) as TrackerConfig;
-  config.enabled_chains=priorityChains(config.enabled_chains);
+  const config = JSON.parse(readFileSync(path, "utf8")) as TrackerConfig;
+  config.enabled_chains = priorityChains(config.enabled_chains);
   return config;
 }
 
@@ -23,14 +23,16 @@ export function configForChain(base: TrackerConfig, chain: Chain): Json {
 }
 
 export function databasePath(config: TrackerConfig, chain: Chain): string {
-  const raw = chain === "sol"
-    ? config.database
-    : (config.database_template ?? "tracker.{chain}.sqlite3").replace("{chain}", chain);
+  const raw =
+    chain === "sol"
+      ? config.database
+      : (config.database_template ?? "tracker.{chain}.sqlite3").replace("{chain}", chain);
   return isAbsolute(raw) ? raw : join(DATA_ROOT, raw);
 }
 
 export function parseChain(value: string, config: TrackerConfig): Chain {
   const chain = value.toLowerCase() as Chain;
-  if (!config.enabled_chains.includes(chain)) throw new Error(`Unknown or disabled chain: ${value}`);
+  if (!config.enabled_chains.includes(chain))
+    throw new Error(`Unknown or disabled chain: ${value}`);
   return chain;
 }

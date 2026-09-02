@@ -19,6 +19,10 @@ import { TrackedWalletRepository, type MongoState } from "./mongo.js";
 import { loadTrackedWalletSeeds } from "./tracked-wallet-seeds.js";
 import { assessWalletPerformance, detectSurgeEvents, profitablePreMoveTrader } from "./surge-attribution.js";
 import { compareChainPriority, priorityChains } from "./chain-priority.js";
+import { LongClient } from "./long/client.js";
+import { qualifyLongAssets } from "./long/analysis.js";
+import { DexScreenerClient } from "./dexscreener/client.js";
+import { normalizeDexScreenerPairs, qualifyDexScreenerPairs } from "./dexscreener/analysis.js";
 
 const envNumber=(name:string,fallback:number)=>{const value=Number(process.env[name]);return Number.isFinite(value)?value:fallback;};
 const sleep=(milliseconds:number)=>new Promise(resolve=>setTimeout(resolve,milliseconds));
@@ -45,7 +49,12 @@ export function priorityChainSlice<T extends Json>(rows:T[],limit:number,minimum
 
 export function isSurgedToken(row:Json):boolean {
   const labels=new Set<string>((row.degen_signal_labels??[]).map(String)),sources=new Set<string>((row.signal_sources??[]).map(String)),change=finiteNumber(row.price_change_5m??row.price_change_percent5m??row.price_change_percent);
-  return Boolean(row.surge_attribution?.event)||["PRICE SURGE","PONS PRICE SURGE","NEW ATH"].some(label=>labels.has(label))||sources.has("price_surge")||sources.has("trending_momentum")||(change!==undefined&&change>=envNumber("MIN_PRICE_SURGE_5M_PERCENT",10));
+  return Boolean(row.surge_attribution?.event)||["PRICE SURGE","PONS PRICE SURGE","DEXSCREENER PRICE SURGE","NEW ATH"].some(label=>labels.has(label))||sources.has("price_surge")||sources.has("trending_momentum")||(change!==undefined&&change>=envNumber("MIN_PRICE_SURGE_5M_PERCENT",10));
+}
+
+export function passesHighMarketCapPolicy(row:Json,maximum=envNumber("ROUTINE_FEED_MAX_MARKET_CAP_USD",1_000_000),minimumTrackedWallets=envNumber("HIGH_CAP_MIN_TRACKED_BUY_WALLETS",2)):boolean {
+  const marketCap=finiteNumber(row.market_cap??row.marketCap),tracked=finiteNumber(row.tracked_buy_wallet_count)??0;
+  return marketCap===undefined||marketCap<=maximum||isSurgedToken(row)||tracked>=minimumTrackedWallets;
 }
 
 export function potentialRunnerScore(row:Json):number {
@@ -53,6 +62,9 @@ export function potentialRunnerScore(row:Json):number {
   const labels=new Set<string>((row.degen_signal_labels??[]).map(String)),smart=finiteNumber(row.smart_degen_count??row.smart_money_count??row.smart_wallets)??0,volume=finiteNumber(row.volume_5m??row.volume??row.volume_1h)??0,change=finiteNumber(row.price_change_5m??row.price_change_percent5m??row.price_change_percent)??0,holders=finiteNumber(row.holder_count),top10=finiteNumber(row.top_10_holder_rate);let score=0;
   if(labels.has("NEAR GRADUATION")||labels.has("JUST GRADUATED")||labels.has("PONS PROGRESS SURGE"))score+=35;
   if(labels.has("NEW ACTIVE LAUNCH"))score+=20;
+  if(labels.has("LONG NEW LAUNCH"))score+=30;
+  if(labels.has("DEXSCREENER NEW PAIR"))score+=30;
+  if(labels.has("DEXSCREENER VOLUME"))score+=20;
   if(labels.has("SMART MONEY")||smart>=3)score+=25;else if(smart>0)score+=10;
   if(row.is_microcap===true)score+=20;
   if(volume>=envNumber("POTENTIAL_RUNNER_MIN_VOLUME_USD",25000))score+=15;
@@ -81,21 +93,32 @@ export class TrackerService {
   private fomoTrackedProfiles=0;
   private fomoProfileErrors=0;
   private trackedBuySafetyStats=new Map<Chain,Json>();
+  private trackedWalletPollStats=new Map<Chain,Json>();
   private ponsScanAt=0;
   private ponsRows:Json[]=[];
   private ponsStats:Json={active:0,graduated:0,qualified:0,refreshed_at:null};
+  private longScanAt=0;
+  private longInitialized=false;
+  private longRows:Json[]=[];
+  private longStats:Json={assets:0,qualified:0,refreshed_at:null,error:null};
+  private dexScreenerScanAt=new Map<Chain,number>();
+  private dexScreenerRows=new Map<Chain,Json[]>();
+  private dexScreenerStats=new Map<Chain,Json>();
   private trendingRows=new Map<Chain,Json[]>();
   private trendingSeen=new Map<string,{firstSeen:number;lastSeen:number}>();
   private trendingDispatch=new Map<string,{sentAt:number;price?:number;tags:Set<string>}>();
+  private potentialDispatch=new Map<string,{sentAt:number;metric?:number;wallets:number;labels:Set<string>}>();
+  private surgedDispatch=new Map<string,{sentAt:number;metric?:number;wallets:number;labels:Set<string>}>();
   private degenRows=new Map<Chain,Json[]>();
   private surgeAttributionCache=new Map<string,{checkedAt:number;attribution?:Json}>();
   private surgeAttributionStats=new Map<Chain,Json>();
-  constructor(readonly config:TrackerConfig,readonly gmgn=new GmgnClient(),readonly twitter=new OpenTwitterClient(),readonly fomo=new FomoClient(),readonly pons=new PonsClient(),readonly mongo?:MongoState){}
+  constructor(readonly config:TrackerConfig,readonly gmgn=new GmgnClient(),readonly twitter=new OpenTwitterClient(),readonly fomo=new FomoClient(),readonly pons=new PonsClient(),readonly mongo?:MongoState,readonly long=new LongClient(),readonly dexScreener=new DexScreenerClient()){}
   store(chain:Chain):TrackerStore {let s=this.stores.get(chain);if(!s){s=new TrackerStore(chain,this.mongo);this.stores.set(chain,s);}return s;}
   async init():Promise<void>{await Promise.all(this.config.enabled_chains.map(chain=>this.store(chain).init()));await this.refreshTrackedWalletsFromMongo();}
   async close():Promise<void>{this.gmgn.close?.();await Promise.all([...this.stores.values()].map(store=>store.close()));}
   roster(chain:Chain){const stored=this.store(chain).roster(),fallback=this.loadTrackedWalletRows().filter(row=>row.chain===chain),combined=new Map<string,Json>();for(const row of [...stored,...fallback])combined.set(`${row.source??"stored"}:${String(row.wallet).toLowerCase()}`,row);return [...combined.values()].sort((a,b)=>Number(b.score??b.fomo_leaderboard_pnl??b.max_position_roi_percent??b.wilson_closed_sample??b.wilson_30d??0)-Number(a.score??a.fomo_leaderboard_pnl??a.max_position_roi_percent??a.wilson_closed_sample??a.wilson_30d??0)).map(row=>({wallet:row.wallet,score:row.score??row.wilson_closed_sample??row.wilson_30d??0,assessed_at:row.generated_at??row.updated_at,source:row.source,tracking_tier:row.tracking_tier??"qualified",fomo_handle:row.fomo_handle,qualifying_positions:row.qualifying_positions??[],max_position_roi_percent:row.max_position_roi_percent,max_realized_position_roi_percent:row.max_realized_position_roi_percent,max_unrealized_position_roi_percent:row.max_unrealized_position_roi_percent,fomo_leaderboard_pnl:row.fomo_leaderboard_pnl}));}
   alerts(chain:Chain,limit=50){return this.store(chain).alerts(limit);}
+  discoveryDecisions(chain:Chain,limit=50,status?:string){return this.store(chain).discoveryDecisions(limit,status);}
   latestTrending(chain:Chain,limit=10):Json[]{return (this.trendingRows.get(chain)??[]).slice(0,limit);}
   diagnostics(chains:Chain[]):Json {
     const tracked=this.loadTrackedWallets();
@@ -104,12 +127,13 @@ export class TrackerService {
       for(const row of recentBuys){const address=addressKey(String(row.tokenAddress??"")),wallet=addressKey(String(row.wallet??""));if(!address||!wallet)continue;const wallets=clusters.get(address)??new Set<string>();wallets.add(wallet);clusters.set(address,wallets);}
       const trending=this.trendingRows.get(chain)??[],fomoTokens=this.fomoTokens.get(chain)??[];
       const degen=this.degenRows.get(chain)??[];
-      return [chain,{gmgn_tracked_wallets:(tracked.get(chain)??[]).length,multiplier_monitor:this.store(chain).callPerformanceSummary(),surge_wallet_attribution:this.surgeAttributionStats.get(chain)??{tokens_checked:0,surge_events:0,confirmed_profitable_wallets:0,track_worthy_wallets:0,rate_limited:false},gmgn_trending_rows:trending.length,gmgn_trending_quality_passed:trending.filter(row=>row.quality_passed===true).length,gmgn_trending_multiwindow_passed:trending.filter(row=>row.multiwindow_passed===true).length,degen_filtered_trending:degen.filter(row=>row.degen_sources?.includes("FILTERED TRENDING")).length,degen_microcaps:degen.filter(row=>row.is_microcap===true).length,degen_surge_events:degen.filter(row=>row.degen_signal_labels?.length).length,...(chain==="robinhood"?{pons_active_launches:this.ponsStats.active,pons_recent_graduated:this.ponsStats.graduated,pons_degen_candidates:this.ponsStats.qualified,pons_refreshed_at:this.ponsStats.refreshed_at}:{}),fomo_discovery_tokens:fomoTokens.length,fomo_trending_tokens:fomoTokens.filter(token=>token.sources.has("fomo_trending")).length,fomo_most_held_tokens:fomoTokens.filter(token=>token.sources.has("fomo_most_held")).length,fomo_eligible_holder_positions:fomoTokens.reduce((sum,token)=>sum+token.holders.length,0),fomo_tracked_profiles:this.fomoTrackedProfiles,fomo_profile_scan_errors:this.fomoProfileErrors,fomo_activity_refreshed_at:this.fomoActivityRefreshedAt?new Date(this.fomoActivityRefreshedAt).toISOString():null,fomo_recent_buy_swaps:recentBuys.length,fomo_recent_buy_wallets:new Set(recentBuys.map(row=>row.wallet).filter(Boolean)).size,fomo_recent_buys:recentBuys.slice(0,10).map(row=>({trader:row.fomo_handle??row.wallet,token:row.tokenAddress,amount_usd:row.amount_usd,bought_at:row.timestamp?new Date(Number(row.timestamp)*1000).toISOString():null})),fomo_recent_sell_swaps:recentSells.length,fomo_recent_sell_wallets:new Set(recentSells.map(row=>row.wallet).filter(Boolean)).size,fomo_recent_sells:recentSells.slice(0,10).map(row=>({trader:row.fomo_handle??row.wallet,token:row.tokenAddress,amount_usd:row.amount_usd,sold_at:row.timestamp?new Date(Number(row.timestamp)*1000).toISOString():null})),fomo_tracked_buy_clusters:[...clusters.values()].filter(wallets=>wallets.size>=envNumber("MIN_TRACKED_BUY_WALLETS",3)).length,tracked_buy_safety:this.trackedBuySafetyStats.get(chain)??{checked:0,passed:0,suppressed:0,unavailable:0,recent_suppressed:[]}}];
+      const decisions=this.store(chain).discoveryDecisions(500),dex=this.dexScreenerStats.get(chain)??{discovered:0,qualified:0,refreshed_at:null,error:null};
+      return [chain,{gmgn_tracked_wallets:(tracked.get(chain)??[]).length,tracked_wallet_poll:this.trackedWalletPollStats.get(chain)??{attempted_wallets:0,events:0,refreshed_at:null,rate_limited:false},multiplier_monitor:this.store(chain).callPerformanceSummary(),surge_wallet_attribution:this.surgeAttributionStats.get(chain)??{tokens_checked:0,surge_events:0,confirmed_profitable_wallets:0,track_worthy_wallets:0,rate_limited:false},gmgn_trending_rows:trending.length,gmgn_trending_quality_passed:trending.filter(row=>row.quality_passed===true).length,gmgn_trending_multiwindow_passed:trending.filter(row=>row.multiwindow_passed===true).length,dexscreener_discovered:dex.discovered,dexscreener_candidates:dex.qualified,dexscreener_refreshed_at:dex.refreshed_at,dexscreener_error:dex.error,discovery_audit:{total:decisions.length,passed:decisions.filter(row=>row.status==="passed").length,suppressed:decisions.filter(row=>row.status==="suppressed").length,pending:decisions.filter(row=>row.status==="pending").length,recent_suppressed:decisions.filter(row=>row.status==="suppressed").slice(0,10)},degen_filtered_trending:degen.filter(row=>row.degen_sources?.includes("FILTERED TRENDING")).length,degen_microcaps:degen.filter(row=>row.is_microcap===true).length,degen_surge_events:degen.filter(row=>row.degen_signal_labels?.length).length,...(chain==="robinhood"?{pons_active_launches:this.ponsStats.active,pons_recent_graduated:this.ponsStats.graduated,pons_degen_candidates:this.ponsStats.qualified,pons_refreshed_at:this.ponsStats.refreshed_at,long_assets:this.longStats.assets,long_candidates:this.longStats.qualified,long_refreshed_at:this.longStats.refreshed_at,long_error:this.longStats.error}:{}),fomo_discovery_tokens:fomoTokens.length,fomo_trending_tokens:fomoTokens.filter(token=>token.sources.has("fomo_trending")).length,fomo_most_held_tokens:fomoTokens.filter(token=>token.sources.has("fomo_most_held")).length,fomo_eligible_holder_positions:fomoTokens.reduce((sum,token)=>sum+token.holders.length,0),fomo_tracked_profiles:this.fomoTrackedProfiles,fomo_profile_scan_errors:this.fomoProfileErrors,fomo_activity_refreshed_at:this.fomoActivityRefreshedAt?new Date(this.fomoActivityRefreshedAt).toISOString():null,fomo_recent_buy_swaps:recentBuys.length,fomo_recent_buy_wallets:new Set(recentBuys.map(row=>row.wallet).filter(Boolean)).size,fomo_recent_buys:recentBuys.slice(0,10).map(row=>({trader:row.fomo_handle??row.wallet,token:row.tokenAddress,amount_usd:row.amount_usd,bought_at:row.timestamp?new Date(Number(row.timestamp)*1000).toISOString():null})),fomo_recent_sell_swaps:recentSells.length,fomo_recent_sell_wallets:new Set(recentSells.map(row=>row.wallet).filter(Boolean)).size,fomo_recent_sells:recentSells.slice(0,10).map(row=>({trader:row.fomo_handle??row.wallet,token:row.tokenAddress,amount_usd:row.amount_usd,sold_at:row.timestamp?new Date(Number(row.timestamp)*1000).toISOString():null})),fomo_tracked_buy_clusters:[...clusters.values()].filter(wallets=>wallets.size>=envNumber("MIN_TRACKED_BUY_WALLETS",3)).length,tracked_buy_safety:this.trackedBuySafetyStats.get(chain)??{checked:0,passed:0,suppressed:0,unavailable:0,recent_suppressed:[]}}];
     }));
   }
   private collapseSuppressed(row:Json,now=Math.floor(Date.now()/1000)):boolean {const chain=row.chain as Chain,address=String(row.address??row.token_address??""),currentMarketCap=finiteNumber(row.market_cap);if(!this.config.enabled_chains.includes(chain)||!address||currentMarketCap===undefined)return false;const tokenConfig=configForChain(this.config,chain).token,collapseRatio=finiteNumber(tokenConfig.catastrophic_market_cap_ratio)??.01,baseline=this.store(chain).callPerformance(address)?.baseline_market_cap;if(!isCatastrophicMarketCapCollapse(baseline,currentMarketCap,collapseRatio)&&!this.store(chain).callPerformance(address)?.dead_at){this.store(chain).observeCatastrophicMarketCapCollapse(address,currentMarketCap,collapseRatio,now);return false;}const state=this.store(chain).observeCatastrophicMarketCapCollapse(address,currentMarketCap,collapseRatio,now,Math.max(1,Math.floor(finiteNumber(tokenConfig.catastrophic_market_cap_confirmations)??2)),Math.max(0,Math.floor(finiteNumber(tokenConfig.catastrophic_market_cap_confirmation_interval_seconds)??15)));return state==="suspected"||state==="dead";}
   async latestTrendingAcross(chains:Chain[],limit=10):Promise<Json[]> {
-    const requireStability=process.env.TRENDING_REQUIRE_MULTIWINDOW_STABILITY!=="false",now=Math.floor(Date.now()/1000),reentry=Math.max(300,envNumber("TRENDING_REENTRY_SECONDS",21600)),cooldown=Math.max(300,envNumber("TRENDING_SIGNAL_COOLDOWN_SECONDS",1800)),minPositive=envNumber("TRENDING_MIN_POSITIVE_CHANGE_PERCENT",0),minGain=Math.max(0,envNumber("TRENDING_REEMIT_MIN_PRICE_GAIN_PERCENT",5))/100,rows:Json[]=chains.flatMap(chain=>(this.trendingRows.get(chain)??[]).map(row=>({...row,chain} as Json))).filter(row=>row.quality_passed===true&&(!requireStability||row.multiwindow_passed===true)&&!this.collapseSuppressed(row,now));
+    const requireStability=process.env.TRENDING_REQUIRE_MULTIWINDOW_STABILITY!=="false",now=Math.floor(Date.now()/1000),reentry=Math.max(300,envNumber("TRENDING_REENTRY_SECONDS",21600)),cooldown=Math.max(300,envNumber("TRENDING_SIGNAL_COOLDOWN_SECONDS",1800)),minPositive=envNumber("TRENDING_MIN_POSITIVE_CHANGE_PERCENT",0),minGain=Math.max(0,envNumber("TRENDING_REEMIT_MIN_PRICE_GAIN_PERCENT",5))/100,rows:Json[]=chains.flatMap(chain=>(this.trendingRows.get(chain)??[]).map(row=>({...row,chain} as Json))).filter(row=>row.quality_passed===true&&(!requireStability||row.multiwindow_passed===true)&&passesHighMarketCapPolicy(row,envNumber("TRENDING_ROUTINE_MAX_MARKET_CAP_USD",envNumber("ROUTINE_FEED_MAX_MARKET_CAP_USD",1_000_000)),envNumber("HIGH_CAP_MIN_TRACKED_BUY_WALLETS",2))&&!this.collapseSuppressed(row,now));
     const selected:Json[]=[];
     for(const row of rows){
       const address=String(row.address??"");if(!address)continue;const key=`${row.chain}:${addressKey(address)}`,seen=this.trendingSeen.get(key),isNew=!seen||now-seen.lastSeen>=reentry,firstSeen=isNew?now:seen.firstSeen;this.trendingSeen.set(key,{firstSeen,lastSeen:now});
@@ -131,27 +155,39 @@ export class TrackerService {
     return selected.sort(rank).slice(0,capped);
   }
   latestSurgedAcross(chains:Chain[],limit=10):Json[]{
-    const rows=mergeDegenRows(chains.flatMap(chain=>this.degenRows.get(chain)??[]),chains.flatMap(chain=>(this.trendingRows.get(chain)??[]).filter(isSurgedToken))).filter(isSurgedToken),rank=(a:Json,b:Json)=>Number(b.surge_attribution?.wallets?.length??0)-Number(a.surge_attribution?.wallets?.length??0)||Number(b.smart_degen_count??b.smart_wallets??0)-Number(a.smart_degen_count??a.smart_wallets??0)||Number(b.price_change_5m??b.price_change_percent5m??b.price_change_percent??0)-Number(a.price_change_5m??a.price_change_percent5m??a.price_change_percent??0)||Number(b.volume_5m??b.volume??0)-Number(a.volume_5m??a.volume??0);
+    const rows=mergeDegenRows(chains.flatMap(chain=>this.degenRows.get(chain)??[]),chains.flatMap(chain=>(this.trendingRows.get(chain)??[]).filter(isSurgedToken))).filter(row=>isSurgedToken(row)&&this.discoveryDispatchAllowed("surged",row)),rank=(a:Json,b:Json)=>Number(b.surge_attribution?.wallets?.length??0)-Number(a.surge_attribution?.wallets?.length??0)||Number(b.smart_degen_count??b.smart_wallets??0)-Number(a.smart_degen_count??a.smart_wallets??0)||Number(b.price_change_5m??b.price_change_percent5m??b.price_change_percent??0)-Number(a.price_change_5m??a.price_change_percent5m??a.price_change_percent??0)||Number(b.volume_5m??b.volume??0)-Number(a.volume_5m??a.volume??0);
     return priorityChainSlice(rows.sort(rank),limit,{robinhood:envNumber("SURGED_ROBINHOOD_MIN_SHARE",.5),bsc:envNumber("SURGED_BSC_MIN_SHARE",.3),sol:envNumber("SURGED_SOL_MIN_SHARE",.2)});
   }
   latestPotentialAcross(chains:Chain[],limit=10):Json[]{
-    const minimum=envNumber("POTENTIAL_RUNNER_MIN_SCORE",45),rows=chains.flatMap(chain=>this.degenRows.get(chain)??[]).map(row=>({...row,potential_runner_score:potentialRunnerScore(row)})).filter(row=>row.potential_runner_score>=minimum),rank=(a:Json,b:Json)=>Number(b.potential_runner_score)-Number(a.potential_runner_score)||Number(b.pons_signal_score??0)-Number(a.pons_signal_score??0)||Number(b.volume_5m??b.volume??b.volume_1h??0)-Number(a.volume_5m??a.volume??a.volume_1h??0);
+    const minimum=envNumber("POTENTIAL_RUNNER_MIN_SCORE",45),rows=chains.flatMap(chain=>this.degenRows.get(chain)??[]).map(row=>({...row,potential_runner_score:potentialRunnerScore(row)})).filter(row=>row.potential_runner_score>=minimum&&passesHighMarketCapPolicy(row,envNumber("POTENTIAL_RUNNER_MAX_MARKET_CAP_USD",envNumber("ROUTINE_FEED_MAX_MARKET_CAP_USD",1_000_000)),envNumber("HIGH_CAP_MIN_TRACKED_BUY_WALLETS",2))&&this.discoveryDispatchAllowed("potential",row)),rank=(a:Json,b:Json)=>Number(b.potential_runner_score)-Number(a.potential_runner_score)||Number(b.long_signal_score??b.pons_signal_score??0)-Number(a.long_signal_score??a.pons_signal_score??0)||Number(b.volume_5m??b.volume??b.volume_1h??0)-Number(a.volume_5m??a.volume??a.volume_1h??0);
     return priorityChainSlice(rows.sort(rank),limit,{robinhood:envNumber("POTENTIAL_ROBINHOOD_MIN_SHARE",.5),bsc:envNumber("POTENTIAL_BSC_MIN_SHARE",.3),sol:envNumber("POTENTIAL_SOL_MIN_SHARE",.2)});
   }
+  private discoveryDispatchAllowed(kind:"surged"|"potential",row:Json,now=Math.floor(Date.now()/1000)):boolean{
+    const map=kind==="surged"?this.surgedDispatch:this.potentialDispatch,key=`${row.chain}:${addressKey(String(row.address??""))}`,prior=map.get(key);if(!prior)return true;
+    const cooldown=Math.max(300,envNumber(kind==="surged"?"SURGED_SIGNAL_COOLDOWN_SECONDS":"POTENTIAL_SIGNAL_COOLDOWN_SECONDS",kind==="surged"?1800:21600)),wallets=Number(row.tracked_buy_wallet_count??0),labels=new Set<string>((row.degen_signal_labels??[]).map(String)),newEvidence=wallets>prior.wallets||[...labels].some(label=>!prior.labels.has(label));if(newEvidence)return true;
+    const metric=finiteNumber(row.price??row.market_cap),minimumGain=Math.max(0,envNumber(kind==="surged"?"SURGED_REEMIT_MIN_GAIN_PERCENT":"POTENTIAL_REEMIT_MIN_GAIN_PERCENT",25))/100;return now-prior.sentAt>=cooldown&&metric!==undefined&&prior.metric!==undefined&&metric>=prior.metric*(1+minimumGain);
+  }
+  acknowledgeDiscovery(kind:"surged"|"potential",rows:Json[],sentAt=Math.floor(Date.now()/1000)):void{const map=kind==="surged"?this.surgedDispatch:this.potentialDispatch;for(const row of rows){const key=`${row.chain}:${addressKey(String(row.address??""))}`;if(key.endsWith(":"))continue;const metric=finiteNumber(row.price??row.market_cap);map.set(key,{sentAt,...(metric===undefined?{}:{metric}),wallets:Number(row.tracked_buy_wallet_count??0),labels:new Set((row.degen_signal_labels??[]).map(String))});}}
+  private recordDiscoveryAudit(row:Json,status:"passed"|"suppressed"|"pending",reasons:string[],detectedAt:number):void{
+    const chain=row.chain as Chain,address=String(row.address??"");if(!this.config.enabled_chains.includes(chain)||!validTokenAddress(chain,address))return;this.store(chain).recordDiscoveryDecision({address,symbol:row.symbol,name:row.name,status,reasons:reasons.slice(0,10),sources:[...new Set([...(row.degen_sources??[]),...(row.dexscreener_discovery_sources??[])].map(String))],signals:[...new Set((row.degen_signal_labels??[]).map(String))],price:finiteNumber(row.price),market_cap:finiteNumber(row.market_cap),liquidity:finiteNumber(row.liquidity),volume_5m:finiteNumber(row.volume_5m??row.volume),price_change_5m:finiteNumber(row.price_change_5m??row.price_change_percent5m??row.price_change_percent),holder_count:finiteNumber(row.holder_count),top_10_holder_rate:finiteNumber(row.top_10_holder_rate),honeypot:row.honeypot,open_source:row.open_source,renounced:row.renounced,liquidity_locked:row.liquidity_locked,dexscreener_url:row.dexscreener_url,safety_checked_at:status==="pending"?null:detectedAt},detectedAt);
+  }
   async enrichDegenRows(rows:Json[]):Promise<Json[]> {
-    const limit=envNumber("PONS_CARD_ENRICH_LIMIT",20),holderLimit=envNumber("PONS_CARD_HOLDER_LIMIT",5),output=rows.map(row=>({...row})),targets=output.filter(row=>this.config.enabled_chains.includes(row.chain)&&validTokenAddress(row.chain,String(row.address))).slice(0,Math.max(0,limit));
+    const detectedAt=Math.floor(Date.now()/1000),limit=envNumber("DISCOVERY_SAFETY_EVALUATION_LIMIT",envNumber("PONS_CARD_ENRICH_LIMIT",20)),holderLimit=envNumber("PONS_CARD_HOLDER_LIMIT",5),output:Json[]=rows.map(row=>({...row,safety_status:"pending"})),targets=output.filter(row=>this.config.enabled_chains.includes(row.chain)&&validTokenAddress(row.chain,String(row.address))).slice(0,Math.max(0,limit)),processed=new Set<Json>();
     for(const row of targets){
+      processed.add(row);
       try {
         const chain=row.chain as Chain,address=String(row.address),[info,security,pool,holders]=await Promise.all([this.gmgn.tokenInfo(chain,address),this.gmgn.tokenSecurity(chain,address),this.gmgn.tokenPool(chain,address),this.gmgn.tokenHolders(chain,address,holderLimit)]),safety=screenTrackedBuyToken(info,security,pool,configForChain(this.config,chain).token),current=finiteNumber(info.price?.price),circulating=finiteNumber(info.circulating_supply),total=finiteNumber(info.max_supply??info.total_supply),athPrice=finiteNumber(info.ath_price),createdAt=finiteNumber(info.pool?.creation_timestamp??info.open_timestamp??info.creation_timestamp),price1h=finiteNumber(info.price?.price_1h);
         const marketCap=current!==undefined&&circulating!==undefined?current*circulating:finiteNumber(row.market_cap),fdv=current!==undefined&&total!==undefined?current*total:finiteNumber(row.market_cap),athMarketCap=athPrice!==undefined&&circulating!==undefined?athPrice*circulating:undefined;
-        Object.assign(row,{safety_passed:safety.passed,safety_reasons:safety.reasons,name:info.name??row.name,symbol:info.symbol??row.symbol,price:current??row.price,market_cap:marketCap,fdv,ath_market_cap:athMarketCap,liquidity:finiteNumber(pool.liquidity??info.liquidity??info.pool?.liquidity)??row.liquidity,price_change_1h:current!==undefined&&price1h!==undefined&&price1h>0?(current/price1h-1)*100:undefined,volume_1h:finiteNumber(info.price?.volume_1h),volume_24h:finiteNumber(info.price?.volume_24h),buys_1h:finiteNumber(info.price?.buys_1h),sells_1h:finiteNumber(info.price?.sells_1h),holder_count:finiteNumber(info.holder_count??info.stat?.holder_count),top_10_holder_rate:finiteNumber(info.stat?.top_10_holder_rate??info.dev?.top_10_holder_rate),fresh_wallet_rate:finiteNumber(info.stat?.fresh_wallet_rate),smart_wallets:finiteNumber(info.wallet_tags_stat?.smart_wallets),pool_address:info.biggest_pool_address??info.pool?.pool_address??row.pool,exchange:info.pool?.exchange,token_age_seconds:createdAt?Math.max(0,Math.floor(Date.now()/1000-createdAt)):row.launch_age_seconds,logo:info.logo,website:info.link?.website,twitter_username:info.link?.twitter_username,telegram:info.link?.telegram,gmgn_url:info.link?.gmgn,top_holders:holders.map(holder=>({address:holder.address,amount_percentage:finiteNumber(holder.amount_percentage),usd_value:finiteNumber(holder.usd_value),tags:Array.isArray(holder.tags)?holder.tags.slice(0,3):[]})).filter(holder=>validTokenAddress(chain,String(holder.address))).slice(0,holderLimit)});
+        Object.assign(row,{safety_status:safety.passed?"passed":"suppressed",safety_passed:safety.passed,safety_reasons:safety.reasons,name:info.name??row.name,symbol:info.symbol??row.symbol,price:current??row.price,market_cap:marketCap,fdv,ath_market_cap:athMarketCap,liquidity:finiteNumber(pool.liquidity??info.liquidity??info.pool?.liquidity)??row.liquidity,price_change_1h:current!==undefined&&price1h!==undefined&&price1h>0?(current/price1h-1)*100:undefined,volume_1h:finiteNumber(info.price?.volume_1h),volume_24h:finiteNumber(info.price?.volume_24h),buys_1h:finiteNumber(info.price?.buys_1h),sells_1h:finiteNumber(info.price?.sells_1h),holder_count:finiteNumber(info.holder_count??info.stat?.holder_count),top_10_holder_rate:finiteNumber(info.stat?.top_10_holder_rate??info.dev?.top_10_holder_rate),fresh_wallet_rate:finiteNumber(info.stat?.fresh_wallet_rate),smart_wallets:finiteNumber(info.wallet_tags_stat?.smart_wallets),pool_address:info.biggest_pool_address??info.pool?.pool_address??row.pool,exchange:info.pool?.exchange,token_age_seconds:createdAt?Math.max(0,detectedAt-createdAt):row.launch_age_seconds,logo:info.logo,website:info.link?.website,twitter_username:info.link?.twitter_username,telegram:info.link?.telegram,gmgn_url:info.link?.gmgn,honeypot:security.is_honeypot??security.honeypot,open_source:security.is_open_source??security.open_source,renounced:security.is_renounced??security.owner_renounced??security.renounced,liquidity_locked:security.lock_summary?.is_locked,top_holders:holders.map(holder=>({address:holder.address,amount_percentage:finiteNumber(holder.amount_percentage),usd_value:finiteNumber(holder.usd_value),tags:Array.isArray(holder.tags)?holder.tags.slice(0,3):[]})).filter(holder=>validTokenAddress(chain,String(holder.address))).slice(0,holderLimit)});
+        this.recordDiscoveryAudit(row,safety.passed?"passed":"suppressed",safety.reasons.filter(reason=>reason.startsWith("FAIL ")),detectedAt);
       } catch(error) {
-        row.safety_passed=false;row.safety_reasons=[`GMGN safety checks unavailable: ${String(error)}`];
+        row.safety_status="pending";row.safety_passed=false;row.safety_reasons=[`GMGN safety checks unavailable: ${String(error)}`];this.recordDiscoveryAudit(row,"pending",row.safety_reasons,detectedAt);
         if(isRateLimit(error)){console.warn("Degen safety enrichment stopped because GMGN entered cooldown",String(error));break;}
         console.warn(`Degen safety enrichment unavailable for ${row.address}`,String(error));
       }
     }
-    return output.filter(row=>row.safety_passed===true);
+    for(const row of output)if(!processed.has(row))this.recordDiscoveryAudit(row,"pending",["Safety evaluation deferred by per-cycle limit"],detectedAt);
+    return output.filter(row=>row.safety_status==="passed");
   }
   async monitorCallMultiples(chains:Chain[],displayedRows:Json[],now=Math.floor(Date.now()/1000),triggered?:Map<Chain,Set<string>>):Promise<Alert[]> {
     if(process.env.MULTIPLE_MONITOR_ENABLED==="false"||this.gmgn.cooldownUntil)return [];
@@ -225,13 +261,14 @@ export class TrackerService {
   invalidateTrackedWalletCache():void {this.trackedWalletCache=undefined;this.trackedWalletRowCache=undefined;this.trackedWalletSignature="";}
   async refreshTrackedWalletsFromMongo():Promise<void>{if(this.mongo)this.mongoTrackedWalletRows=await new TrackedWalletRepository(this.mongo).loadAll();this.invalidateTrackedWalletCache();}
   private async collectWalletSignals(chain:Chain,map:Map<string,SignalCandidate>):Promise<void> {
-    const every=envNumber("TRACKED_WALLET_SCAN_EVERY_MS",300000),now=Date.now();if(now-(this.walletScanAt.get(chain)??0)<every)return;this.walletScanAt.set(chain,now);
-    const qualifiedWallets=this.loadTrackedWallets().get(chain)??[],qualified=new Set(qualifiedWallets.map(addressKey));
-    try {for(const row of await this.gmgn.followedWallets(chain,100))if(qualified.has(addressKey(String(row.maker??""))))this.addEvent(map,chain,row,"followed_wallet");}catch(error){if(isRateLimit(error))throw error;console.warn(`${chain}: GMGN followed-wallet feed unavailable`,String(error));}
-    if(process.env.DISABLE_TRACKED_WALLET_FALLBACK==="true")return;
+    const every=envNumber("TRACKED_WALLET_SCAN_EVERY_MS",60000),now=Date.now();if(now-(this.walletScanAt.get(chain)??0)<every)return;this.walletScanAt.set(chain,now);
+    const trackedRows=this.loadTrackedWalletRows().filter(row=>row.chain===chain),qualifiedWallets=this.loadTrackedWallets().get(chain)??[],qualified=new Set(qualifiedWallets.map(addressKey)),labels=new Map(trackedRows.map(row=>[addressKey(String(row.wallet??"")),String(row.fomo_handle??row.name??row.wallet)])),stats:Json={started_at:new Date(now).toISOString(),refreshed_at:null,tracked_wallets:qualifiedWallets.length,attempted_wallets:0,followed_events:0,activity_events:0,events:0,rate_limited:false,error:null};
+    if(typeof this.gmgn.followedWallets==="function")try {for(const row of await this.gmgn.followedWallets(chain,100)){const wallet=addressKey(String(row.maker??""));if(!qualified.has(wallet))continue;this.addEvent(map,chain,{...row,trader_label:labels.get(wallet)??wallet},"followed_wallet");if(recent(row,envNumber("SIGNAL_LOOKBACK_SECONDS",1800)))stats.followed_events++;}}catch(error){if(isRateLimit(error)){stats.rate_limited=true;stats.error=String(error);this.trackedWalletPollStats.set(chain,stats);return;}console.warn(`${chain}: GMGN followed-wallet feed unavailable`,String(error));}
+    if(process.env.DISABLE_TRACKED_WALLET_FALLBACK==="true"){stats.events=stats.followed_events;stats.refreshed_at=new Date().toISOString();this.trackedWalletPollStats.set(chain,stats);return;}
     const limit=Math.max(0,Math.floor(envNumber(`TRACKED_WALLET_FALLBACK_LIMIT_${chain.toUpperCase()}`,envNumber("TRACKED_WALLET_FALLBACK_LIMIT",5)))),start=qualifiedWallets.length?(this.walletScanCursor.get(chain)??0)%qualifiedWallets.length:0,batch=rotatingSlice(qualifiedWallets,start,limit);
     if(qualifiedWallets.length)this.walletScanCursor.set(chain,(start+batch.length)%qualifiedWallets.length);
-    for(const wallet of batch){try{for(const row of await this.gmgn.walletActivity(chain,wallet,20))if(["buy","sell"].includes(String(row.event_type??row.type)))this.addEvent(map,chain,{...row,wallet},"tracked_wallet");}catch(error){if(isRateLimit(error)){console.warn(`${chain}: tracked-wallet fallback paused at ${wallet}; core market results from this scan are preserved`,String(error));break;}console.warn(`${chain}: could not scan tracked wallet ${wallet}`,String(error));}}
+    if(typeof this.gmgn.walletActivity==="function")for(const wallet of batch){stats.attempted_wallets++;try{for(const row of await this.gmgn.walletActivity(chain,wallet,20))if(["buy","sell"].includes(String(row.event_type??row.type))){this.addEvent(map,chain,{...row,wallet,trader_label:labels.get(addressKey(wallet))??wallet},"tracked_wallet");if(recent(row,envNumber("SIGNAL_LOOKBACK_SECONDS",1800)))stats.activity_events++;}}catch(error){if(isRateLimit(error)){stats.rate_limited=true;stats.error=String(error);console.warn(`${chain}: tracked-wallet fallback paused at ${wallet}; collected wallet events are preserved`,String(error));break;}console.warn(`${chain}: could not scan tracked wallet ${wallet}`,String(error));}}
+    stats.events=Number(stats.followed_events)+Number(stats.activity_events);stats.refreshed_at=new Date().toISOString();this.trackedWalletPollStats.set(chain,stats);
   }
   private async refreshTwitter():Promise<void> {
     if(!this.twitter.enabled)return;const every=envNumber("TWITTER_SCAN_EVERY_MS",120000),now=Date.now();if(now-this.twitterScanAt<every)return;this.twitterScanAt=now;
@@ -293,14 +330,44 @@ export class TrackerService {
     }
   }
 
+  private async refreshLong():Promise<void>{
+    if(!this.long.enabled)return;
+    const every=Math.max(30000,envNumber("LONG_SCAN_EVERY_MS",60000)),now=Date.now();
+    if(now-this.longScanAt<every)return;
+    this.longScanAt=now;
+    try{
+      const snapshot=await this.long.assets(),nowSeconds=Math.floor(now/1000),qualified=qualifyLongAssets(snapshot.assets,nowSeconds,!this.longInitialized);
+      this.longInitialized=true;this.longRows=qualified;this.longStats={assets:snapshot.assets.length,qualified:qualified.length,refreshed_at:new Date(now).toISOString(),error:null};
+    }catch(error){
+      this.longStats={...this.longStats,error:String(error),failed_at:new Date(now).toISOString()};
+      console.warn("Long Robinhood launch discovery scan failed",String(error));
+    }
+  }
+
+  private async refreshDexScreener(chain:Chain):Promise<boolean>{
+    if(!this.dexScreener.enabled)return false;const enabled=new Set(String(process.env.DEXSCREENER_CHAINS??"robinhood").split(",").map(value=>value.trim().toLowerCase()).filter(Boolean));if(!enabled.has(chain))return false;
+    const every=Math.max(30000,envNumber("DEXSCREENER_SCAN_EVERY_MS",60000)),now=Date.now(),last=this.dexScreenerScanAt.get(chain)??0;if(now-last<every)return false;this.dexScreenerScanAt.set(chain,now);
+    try{
+      const snapshot=await this.dexScreener.discover(chain),nowSeconds=Math.floor(now/1000),normalized=normalizeDexScreenerPairs(chain,snapshot.pairs,nowSeconds),qualified=qualifyDexScreenerPairs(chain,snapshot.pairs,nowSeconds);this.dexScreenerRows.set(chain,qualified);this.dexScreenerStats.set(chain,{discovered:snapshot.discovered,pairs:snapshot.pairs.length,qualified:qualified.length,refreshed_at:new Date(now).toISOString(),error:null});
+      for(const row of normalized)this.recordDiscoveryAudit(row,"pending",row.degen_signal_labels.length?["GMGN safety evaluation pending"]:["Observed by DexScreener; movement thresholds not met"],nowSeconds);
+      return true;
+    }catch(error){this.dexScreenerStats.set(chain,{...(this.dexScreenerStats.get(chain)??{}),error:String(error),failed_at:new Date(now).toISOString()});console.warn(`${chain}: DexScreener discovery scan failed`,String(error));return false;}
+  }
+
+  async pollDexScreenerDiscovery(chains:Chain[]):Promise<{safe:Json[];surged:Json[];potential:Json[]}>{
+    const candidates:Json[]=[];for(const chain of priorityChains(chains)){if(!await this.refreshDexScreener(chain))continue;const dexRows=this.dexScreenerRows.get(chain)??[],existing=(this.degenRows.get(chain)??[]).filter(row=>!(row.degen_sources??[]).includes("DEXSCREENER"));this.degenRows.set(chain,mergeDegenRows(existing,dexRows));candidates.push(...dexRows);}
+    if(!candidates.length||this.gmgn.cooldownUntil)return {safe:[],surged:[],potential:[]};
+    const safe=await this.enrichDegenRows(candidates),surged=safe.filter(row=>isSurgedToken(row)&&this.discoveryDispatchAllowed("surged",row)).sort((a,b)=>Number(b.price_change_5m??0)-Number(a.price_change_5m??0)||Number(b.volume_5m??0)-Number(a.volume_5m??0)).slice(0,Math.max(0,envNumber("SURGED_DIGEST_LIMIT",10))),surgedKeys=new Set(surged.map(row=>rowKey(row))),scored:Json[]=safe.map(row=>({...row,potential_runner_score:potentialRunnerScore(row)})),potential=scored.filter(row=>!surgedKeys.has(rowKey(row))&&row.potential_runner_score>=envNumber("POTENTIAL_RUNNER_MIN_SCORE",45)&&passesHighMarketCapPolicy(row)&&this.discoveryDispatchAllowed("potential",row)).sort((a,b)=>Number(b.potential_runner_score)-Number(a.potential_runner_score)||Number(b.volume_5m??0)-Number(a.volume_5m??0)).slice(0,Math.max(0,envNumber("POTENTIAL_DIGEST_LIMIT",10)));return {safe,surged,potential};
+  }
+
   private async collectCandidates(chain:Chain,limit:number):Promise<Map<string,SignalCandidate>> {
     const cfg=configForChain(this.config,chain),map=new Map<string,SignalCandidate>(),store=this.store(chain);
     const supportsPublicFeeds=["sol","bsc","base","eth"].includes(chain),qualified=new Set((this.loadTrackedWallets().get(chain)??[]).map(addressKey));
     const [trending,signals,smartMoney,kols]=await Promise.all([this.gmgn.trending(chain,cfg.market_filters??[],Math.min(limit,envNumber("TRENDING_LIMIT",30))),this.gmgn.marketSignals(chain),supportsPublicFeeds?this.gmgn.smartMoney(chain,Math.min(limit,100)):Promise.resolve([]),supportsPublicFeeds?this.gmgn.kol(chain,Math.min(limit,100)):Promise.resolve([])]);
     const normalizedTrending:Json[]=trending.map(row=>{const market:Json={...marketSnapshot(row),chain},address=String(market.address??""),price=Number(market.price),gate=passesMarketGate(market,cfg.token),valid=validTokenAddress(chain,address);if(valid&&Number.isFinite(price)&&price>0){const key=addressKey(address),change30=store.trendingPriceChange(key,price,envNumber("TRENDING_PRICE_LOOKBACK_SECONDS",1800));if(change30!==undefined)market.price_change_30m=change30;store.recordTrendingPrice(key,price);}market.quality_passed=gate.passed&&valid;market.quality_reasons=valid?gate.reasons:[...gate.reasons,"invalid token address"];return market;});
     let degen=buildDegenRows(chain,normalizedTrending,signals,cfg.token,envNumber("DEGEN_MAX_MARKET_CAP_USD",100000));
-    if(chain==="robinhood"){await this.refreshPons();degen=mergeDegenRows(degen,this.ponsRows);}
-    for(const row of degen){const labels=new Set<string>((row.degen_signal_labels??[]).map(String)),change=finiteNumber(row.price_change_5m??row.price_change_percent5m??row.price_change_percent),surging=labels.has("PRICE SURGE")||labels.has("PONS PRICE SURGE")||(change!==undefined&&change>=envNumber("MIN_PRICE_SURGE_5M_PERCENT",10));if(!surging||!passesSurgeDiscoveryGate(row,cfg.token).passed)continue;const item=this.candidate(map,chain,String(row.address),row.symbol);item.market=row;item.sources.add("trending_momentum");}
+    await this.refreshDexScreener(chain);degen=mergeDegenRows(degen,this.dexScreenerRows.get(chain)??[]);if(chain==="robinhood"){await Promise.all([this.refreshPons(),this.refreshLong()]);degen=mergeDegenRows(degen,this.ponsRows,this.longRows);}
+    for(const row of degen){const labels=new Set<string>((row.degen_signal_labels??[]).map(String)),change=finiteNumber(row.price_change_5m??row.price_change_percent5m??row.price_change_percent),fromDex=(row.degen_sources??[]).includes("DEXSCREENER"),surging=labels.has("PRICE SURGE")||labels.has("PONS PRICE SURGE")||labels.has("DEXSCREENER PRICE SURGE")||(change!==undefined&&change>=envNumber("MIN_PRICE_SURGE_5M_PERCENT",10));if(!surging||(!fromDex&&!passesSurgeDiscoveryGate(row,cfg.token).passed))continue;const item=this.candidate(map,chain,String(row.address),row.symbol);item.market=row;item.sources.add("trending_momentum");if(fromDex)item.sources.add("dexscreener_market");}
     this.degenRows.set(chain,degen);
     const probeLimit=envNumber("TRENDING_MULTIWINDOW_CHECK_LIMIT_PER_CHAIN",10),probeOrder=normalizedTrending.filter(row=>row.quality_passed===true).sort((a,b)=>Number(b.volume??0)-Number(a.volume??0));
     for(const [index,market] of probeOrder.entries()){
@@ -315,7 +382,7 @@ export class TrackerService {
     for(const row of signals){const market=marketSnapshot(row),address=String(market.address??"");if(!validTokenAddress(chain,address)||!passesMarketGate(market,cfg.token).passed)continue;const item=this.candidate(map,chain,address,market.symbol);item.market=market;const type=Number(row.signal_type);item.sources.add(type===12?"smart_money_signal":"price_surge");if(row.id)item.sourceIds.add(String(row.id));}
     for(const row of smartMoney)if(qualified.has(addressKey(String(row.maker??""))))this.addEvent(map,chain,row,"smart_money_wallet");
     for(const row of kols)if(qualified.has(addressKey(String(row.maker??""))))this.addEvent(map,chain,row,"kol_wallet");
-    await this.collectWalletSignals(chain,map);this.attachFomo(chain,map);this.attachTwitter(map);for(const market of normalizedTrending){const candidate=map.get(addressKey(String(market.address??"")));market.signal_sources=candidate?[...candidate.sources]:[];}return map;
+    await this.collectWalletSignals(chain,map);this.attachFomo(chain,map);this.attachTwitter(map);for(const market of normalizedTrending){const candidate=map.get(addressKey(String(market.address??"")));market.signal_sources=candidate?[...candidate.sources]:[];market.tracked_buy_wallet_count=candidate?.buyWallets.size??0;}for(const row of degen){const candidate=map.get(addressKey(String(row.address??"")));row.tracked_buy_wallet_count=candidate?.buyWallets.size??0;row.tracked_buy_traders=[...(candidate?.traderLabels??[])];}return map;
   }
 
   private async enrichSurgeAttributions(chain:Chain,candidates:Map<string,SignalCandidate>):Promise<void> {
@@ -336,6 +403,25 @@ export class TrackerService {
     }
   }
 
+  private trackedWalletAlerts(chain:Chain,candidates:Map<string,SignalCandidate>):Alert[]{
+    const store=this.store(chain),output:Alert[]=[];
+    for(const candidate of candidates.values()){
+      const sellCount=candidate.sellWallets?.size??0;
+      if(sellCount&&candidate.trackedBuySafety?.passed===true){const kind="TRACKED_WALLET_SELL",cooldown=envNumber("TRACKED_WALLET_SELL_ALERT_COOLDOWN_MS",900000);if(Date.now()/1000-store.lastAlertAt(candidate.address,kind)>=cooldown/1000){const liquidity=finiteNumber(candidate.tokenPool?.liquidity??candidate.tokenInfo?.liquidity??candidate.tokenInfo?.pool?.liquidity),alert:Alert={tier:"RESEARCH",kind,tracking_label:"SELL WATCH",chain,address:candidate.address,...(candidate.symbol?{symbol:candidate.symbol}:{}),wallet_count:sellCount,wallets:[...(candidate.sellWallets??[])],traders:[...(candidate.sellTraderLabels??[])],sources:[...(candidate.sellSources??[])],aggregate_sell_usd:Math.round((candidate.aggregateSellUsd??0)*100)/100,market_cap_at_detection:candidate.observedMarketCap,market_cap_observed_at:candidate.marketCapObservedAt,liquidity_at_detection:liquidity,first_timestamp:candidate.firstTimestamp};if(store.saveAlert(alert,candidate.firstTimestamp))output.push(alert);}}
+      const count=candidate.buyWallets.size;if(!count||candidate.trackedBuySafety?.passed!==true)continue;
+      const trackingLabel=count>=3?"BUY SIGNAL":count===2?"POTENTIAL":"OBSERVE",kind=count>=3?"TRACKED_WALLET_BUY_SIGNAL":count===2?"TRACKED_WALLET_POTENTIAL":"TRACKED_WALLET_OBSERVE",cooldown=count>=3?envNumber("WALLET_CLUSTER_ALERT_COOLDOWN_MS",1800000):envNumber("TRACKED_WALLET_BUY_ALERT_COOLDOWN_MS",1800000);
+      if(Date.now()/1000-store.lastAlertAt(candidate.address,kind)<cooldown/1000)continue;
+      const marketCap=candidate.observedMarketCap,liquidity=finiteNumber(candidate.tokenPool?.liquidity??candidate.tokenInfo?.liquidity??candidate.tokenInfo?.pool?.liquidity),alert:Alert={tier:"RESEARCH",kind,tracking_label:trackingLabel,chain,address:candidate.address,...(candidate.symbol?{symbol:candidate.symbol}:{}),wallet_count:count,wallets:[...candidate.buyWallets],traders:[...(candidate.traderLabels??[])],sources:[...candidate.sources],aggregate_buy_usd:Math.round(candidate.aggregateBuyUsd*100)/100,market_cap_at_detection:marketCap,market_cap_observed_at:candidate.marketCapObservedAt,liquidity_at_detection:liquidity,liquidity_to_market_cap_ratio:liquidity!==undefined&&marketCap!==undefined&&marketCap>0?liquidity/marketCap:undefined,holder_count_at_detection:finiteNumber(candidate.tokenInfo?.holder_count??candidate.tokenInfo?.stat?.holder_count),top_10_holder_rate_at_detection:finiteNumber(candidate.tokenInfo?.stat?.top_10_holder_rate??candidate.tokenInfo?.dev?.top_10_holder_rate),safety_reasons:candidate.trackedBuySafety.reasons,first_timestamp:candidate.firstTimestamp};
+      if(store.saveAlert(alert,candidate.firstTimestamp))output.push(alert);
+    }
+    return output;
+  }
+
+  async scanTrackedWallets(chain:Chain):Promise<Alert[]>{
+    await this.refreshFomo();const candidates=new Map<string,SignalCandidate>();this.attachFomo(chain,candidates);await this.collectWalletSignals(chain,candidates);if(!candidates.size)return [];
+    await this.enrichTrackedBuyCandidates(chain,candidates);return this.trackedWalletAlerts(chain,candidates);
+  }
+
   async scan(chain:Chain,limit=200):Promise<Alert[]> {
     if(this.running.has(chain))throw new Error(`A ${chain} scan is already running`);this.running.add(chain);
     try {
@@ -345,16 +431,7 @@ export class TrackerService {
       try {candidates=await this.collectCandidates(chain,limit);}
       catch(error){candidates=new Map();this.attachFomo(chain,candidates);this.attachTwitter(candidates);if(!candidates.size)throw error;console.warn(`${chain}: market feeds unavailable; continuing with ${candidates.size} direct Fomo tracked-buy candidate(s)`,String(error));}
 
-      await this.enrichTrackedBuyCandidates(chain,candidates);await this.enrichSurgeAttributions(chain,candidates);
-      for(const candidate of candidates.values()){
-        const sellCount=candidate.sellWallets?.size??0;
-        if(sellCount&&candidate.trackedBuySafety?.passed===true){const kind="TRACKED_WALLET_SELL",cooldown=envNumber("TRACKED_WALLET_SELL_ALERT_COOLDOWN_MS",900000);if(Date.now()/1000-store.lastAlertAt(candidate.address,kind)>=cooldown/1000){const liquidity=finiteNumber(candidate.tokenPool?.liquidity??candidate.tokenInfo?.liquidity??candidate.tokenInfo?.pool?.liquidity),alert:Alert={tier:"RESEARCH",kind,tracking_label:"SELL WATCH",chain,address:candidate.address,...(candidate.symbol?{symbol:candidate.symbol}:{}),wallet_count:sellCount,wallets:[...(candidate.sellWallets??[])],traders:[...(candidate.sellTraderLabels??[])],sources:[...(candidate.sellSources??[])],aggregate_sell_usd:Math.round((candidate.aggregateSellUsd??0)*100)/100,market_cap_at_detection:candidate.observedMarketCap,market_cap_observed_at:candidate.marketCapObservedAt,liquidity_at_detection:liquidity,first_timestamp:candidate.firstTimestamp};if(store.saveAlert(alert,candidate.firstTimestamp))output.push(alert);}}
-        const count=candidate.buyWallets.size;if(!count||candidate.trackedBuySafety?.passed!==true)continue;
-        const trackingLabel=count>=3?"BUY SIGNAL":count===2?"POTENTIAL":"OBSERVE",kind=count>=3?"TRACKED_WALLET_BUY_SIGNAL":count===2?"TRACKED_WALLET_POTENTIAL":"TRACKED_WALLET_OBSERVE",cooldown=count>=3?envNumber("WALLET_CLUSTER_ALERT_COOLDOWN_MS",1800000):envNumber("TRACKED_WALLET_BUY_ALERT_COOLDOWN_MS",1800000);
-        if(Date.now()/1000-store.lastAlertAt(candidate.address,kind)<cooldown/1000)continue;
-        const marketCap=candidate.observedMarketCap,liquidity=finiteNumber(candidate.tokenPool?.liquidity??candidate.tokenInfo?.liquidity??candidate.tokenInfo?.pool?.liquidity),alert:Alert={tier:"RESEARCH",kind,tracking_label:trackingLabel,chain,address:candidate.address,...(candidate.symbol?{symbol:candidate.symbol}:{}),wallet_count:count,wallets:[...candidate.buyWallets],traders:[...(candidate.traderLabels??[])],sources:[...candidate.sources],aggregate_buy_usd:Math.round(candidate.aggregateBuyUsd*100)/100,market_cap_at_detection:marketCap,market_cap_observed_at:candidate.marketCapObservedAt,liquidity_at_detection:liquidity,liquidity_to_market_cap_ratio:liquidity!==undefined&&marketCap!==undefined&&marketCap>0?liquidity/marketCap:undefined,holder_count_at_detection:finiteNumber(candidate.tokenInfo?.holder_count??candidate.tokenInfo?.stat?.holder_count),top_10_holder_rate_at_detection:finiteNumber(candidate.tokenInfo?.stat?.top_10_holder_rate??candidate.tokenInfo?.dev?.top_10_holder_rate),safety_reasons:candidate.trackedBuySafety.reasons,first_timestamp:candidate.firstTimestamp};
-        if(store.saveAlert(alert,candidate.firstTimestamp))output.push(alert);
-      }
+      await this.enrichTrackedBuyCandidates(chain,candidates);await this.enrichSurgeAttributions(chain,candidates);output.push(...this.trackedWalletAlerts(chain,candidates));
 
       const selected=[...candidates.values()].filter(candidate=>shouldInvestigate(candidate,envNumber("MIN_SIGNAL_STRENGTH",3))).sort((a,b)=>signalStrength(b)-signalStrength(a)).slice(0,envNumber("MAX_CANDIDATES_PER_CHAIN",5));
       for(const candidate of selected){

@@ -21,6 +21,9 @@ export class AppController {
   @Get("api/alerts/:chain")
   alerts(@Param("chain") raw:string,@Query("limit") requested?:string){const chain=parseChain(raw,this.runtime.config),limit=Math.min(Math.max(Number(requested)||50,1),200);return {chain,alerts:this.runtime.tracker.alerts(chain,limit)};}
 
+  @Get("api/discoveries/:chain")
+  discoveries(@Param("chain") raw:string,@Query("limit") requested?:string,@Query("status") status?:string){const chain=parseChain(raw,this.runtime.config),limit=Math.min(Math.max(Number(requested)||50,1),200),allowed=status&&["passed","suppressed","pending"].includes(status)?status:undefined;return {chain,discoveries:this.runtime.tracker.discoveryDecisions(chain,limit,allowed)};}
+
   @Sse("api/stream")
   events():Observable<MessageEvent>{
     return new Observable(subscriber=>{

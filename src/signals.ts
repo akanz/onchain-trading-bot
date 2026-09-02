@@ -18,6 +18,8 @@ export type SignalSource =
   | "fomo_holder"
   | "fomo_leaderboard"
   | "fomo_tracked_wallet"
+  | "long_launchpad"
+  | "dexscreener_market"
   | "twitter";
 
 export interface SignalCandidate {
@@ -124,6 +126,8 @@ export function signalStrength(candidate:SignalCandidate):number {
   if(candidate.sources.has("fomo_holder"))score+=2;
   if(candidate.sources.has("fomo_leaderboard"))score+=3;
   if(candidate.sources.has("fomo_tracked_wallet"))score+=3;
+  if(candidate.sources.has("long_launchpad"))score+=1;
+  if(candidate.sources.has("dexscreener_market"))score+=1;
   if(candidate.sources.has("smart_money_wallet"))score+=candidate.wallets.size>=3?3:candidate.wallets.size>=2?2:1;
   if(candidate.sources.has("kol_wallet"))score+=candidate.wallets.size>=3?2:1;
   return score;

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractContractAddresses, hasTrackedBuyCluster, isCatastrophicMarketCapCollapse, passesMarketGate, passesSurgeDiscoveryGate, shouldInvestigate, type SignalCandidate } from "../src/signals.js";
 import { TrackerStore } from "../src/store.js";
-import { isSurgedToken, potentialRunnerScore, priorityChainSlice, TrackerService, rotatingSlice } from "../src/service.js";
+import { isSurgedToken, passesHighMarketCapPolicy, potentialRunnerScore, priorityChainSlice, TrackerService, rotatingSlice } from "../src/service.js";
 import { loadConfig } from "../src/config.js";
 import { GmgnRateLimitError } from "../src/gmgn.js";
 
@@ -32,11 +32,18 @@ test("tracked-wallet fallback batches rotate through the full roster",()=>{
 
 test("cross-chain feeds reserve and display Robinhood, BSC, then Solana",()=>{const rows=[...Array.from({length:8},(_,i)=>({chain:"sol",address:`sol-${i}`})),...Array.from({length:8},(_,i)=>({chain:"bsc",address:`bsc-${i}`})),...Array.from({length:8},(_,i)=>({chain:"robinhood",address:`rh-${i}`}))] as any[];const selected=priorityChainSlice(rows,10);assert.equal(selected.filter(row=>row.chain==="robinhood").length,5);assert.equal(selected.filter(row=>row.chain==="bsc").length,3);assert.equal(selected.filter(row=>row.chain==="sol").length,2);assert.deepEqual([...new Set(selected.map(row=>row.chain))],["robinhood","bsc","sol"]);});
 test("surges are separated from scored pre-run candidates",()=>{const surge={degen_signal_labels:["PRICE SURGE"],price_change_5m:40,is_microcap:true},potential={degen_signal_labels:["NEAR GRADUATION"],is_microcap:true,volume:50_000,holder_count:100,top_10_holder_rate:.2};assert.equal(isSurgedToken(surge),true);assert.equal(potentialRunnerScore(surge),0);assert.equal(isSurgedToken(potential),false);assert.ok(potentialRunnerScore(potential)>=45);});
+test("routine feeds suppress mature tokens unless they surge or have two tracked buyers",()=>{const mature={market_cap:36_400_000,price_change_5m:1.5,degen_signal_labels:[],signal_sources:[]};assert.equal(passesHighMarketCapPolicy(mature),false);assert.equal(passesHighMarketCapPolicy({...mature,price_change_5m:20}),true);assert.equal(passesHighMarketCapPolicy({...mature,tracked_buy_wallet_count:2}),true);});
 
 test("tracked-wallet fallback stops on rate limit without discarding core scan state",async()=>{
   let calls=0;const gmgn={followedWallets:async()=>[],walletActivity:async()=>{calls++;throw new GmgnRateLimitError("limited",Date.now()+30_000);}},service=new TrackerService({...loadConfig(),default_chain:"sol",enabled_chains:["sol"]} as any,gmgn as any);
   (service as any).mongoTrackedWalletRows=[{source:"gmgn",chain:"sol",wallet:"wallet-a",tracking_tier:"qualified"},{source:"gmgn",chain:"sol",wallet:"wallet-b",tracking_tier:"qualified"}];
   await (service as any).collectWalletSignals("sol",new Map());assert.equal(calls,1);await service.close();
+});
+
+test("dedicated wallet monitor emits a named buy without running discovery feeds",async()=>{
+  const token="0x9999999999999999999999999999999999999999",wallet="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",now=Math.floor(Date.now()/1000),info={symbol:"EARLY",circulating_supply:1_000_000,holder_count:100,price:{price:.02},stat:{top_10_holder_rate:.2}},security={is_honeypot:false,is_blacklist:false,can_not_sell:0,is_open_source:true,is_renounced:true,buy_tax:0,sell_tax:0,top_10_holder_rate:.2,lock_summary:{is_locked:true}},gmgn={followedWallets:async()=>[],walletActivity:async(_chain:string,scanned:string)=>scanned===wallet?[{event_type:"buy",token_address:token,timestamp:now-5,cost_usd:200}]:[],tokenInfo:async()=>info,tokenSecurity:async()=>security,tokenPool:async()=>({liquidity:5_000})},service=new TrackerService({...loadConfig(),default_chain:"robinhood",enabled_chains:["robinhood"]} as any,gmgn as any);
+  (service as any).refreshFomo=async()=>{};(service as any).mongoTrackedWalletRows=[{source:"fomo",chain:"robinhood",wallet,fomo_user_id:"profile-1",fomo_handle:"alphaTrader",tracking_tier:"qualified",score:1_000_000_000}];service.invalidateTrackedWalletCache();
+  const [alert]=await service.scanTrackedWallets("robinhood");assert.equal(alert?.kind,"TRACKED_WALLET_OBSERVE");assert.deepEqual(alert?.traders,["alphaTrader"]);assert.equal(alert?.market_cap_at_detection,20_000);await service.close();
 });
 
 test("tracked-wallet alerts upgrade from observe to potential to buy signal",async()=>{

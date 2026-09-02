@@ -20,23 +20,26 @@ export class TrackerStore extends MongoCachedStore {
   private readonly trendingPrices=new Map<string,Json[]>();
   private readonly metricSamples=new Map<string,Json[]>();
   private readonly calls=new Map<string,Json>();
+  private readonly discoveryRows=new Map<string,Json>();
 
   constructor(readonly scope:string,mongo?:MongoState){super(mongo);}
 
   async init():Promise<void>{
     if(!this.mongo)return;
-    const [profiles,alerts,prices,metrics,calls]=await Promise.all([
+    const [profiles,alerts,prices,metrics,calls,discoveries]=await Promise.all([
       this.mongo.db.collection<Json>("tracker_profiles").find({scope:this.scope}).toArray(),
       this.mongo.db.collection<Json>("tracker_alerts").find({scope:this.scope}).sort({created_at:-1}).limit(1000).toArray(),
       this.mongo.db.collection<Json>("trending_prices").find({scope:this.scope}).toArray(),
       this.mongo.db.collection<Json>("metric_samples").find({scope:this.scope}).toArray(),
       this.mongo.db.collection<Json>("call_performance").find({scope:this.scope}).toArray(),
+      this.mongo.db.collection<Json>("discovery_decisions").find({scope:this.scope}).sort({last_detected_at:-1}).limit(500).toArray(),
     ]);
     for(const row of profiles)this.profiles.set(String(row.wallet),row);
     for(const row of alerts)this.alertRows.set(`${row.token}:${row.window_start}`,row);
     for(const row of prices)this.trendingPrices.set(String(row.token),[...(this.trendingPrices.get(String(row.token))??[]),row]);
     for(const row of metrics){const key=`${row.token}:${row.metric}`;this.metricSamples.set(key,[...(this.metricSamples.get(key)??[]),row]);}
     for(const row of calls)this.calls.set(String(row.token),row);
+    for(const row of discoveries)this.discoveryRows.set(String(row.token),row);
   }
 
   roster():Json[]{return [...this.profiles.values()].filter(row=>row.passed===true||Number(row.passed)===1).sort((a,b)=>Number(b.score)-Number(a.score)).map(row=>({wallet:row.wallet,score:row.score,assessed_at:row.assessed_at}));}
@@ -65,6 +68,11 @@ export class TrackerStore extends MongoCachedStore {
   independentFunders(wallets:string[]):number{return new Set(wallets.map(wallet=>this.profiles.get(wallet)?.funder||`wallet:${wallet}`)).size;}
   saveAlert(alert:Alert,windowStart:number):boolean {const token=alert.kind?`${alert.kind}:${alert.address}`:alert.address,key=`${token}:${windowStart}`;if(this.alertRows.has(key))return false;const row={scope:this.scope,token,window_start:windowStart,tier:alert.tier,payload:structuredClone(alert),created_at:Math.floor(Date.now()/1000)};this.alertRows.set(key,row);this.write(()=>this.mongo!.db.collection("tracker_alerts").updateOne({scope:this.scope,token,window_start:windowStart},{$setOnInsert:row},{upsert:true}));return true;}
   alerts(limit=50):Alert[]{return [...this.alertRows.values()].sort((a,b)=>Number(b.created_at)-Number(a.created_at)).slice(0,limit).map(row=>structuredClone(row.payload));}
+  recordDiscoveryDecision(input:Json,detectedAt=Math.floor(Date.now()/1000)):void {
+    const token=String(input.address??input.token??"");if(!token)return;const existing=this.discoveryRows.get(token),newObservation=Number(existing?.last_detected_at)!==detectedAt,row={...existing,...structuredClone(input),scope:this.scope,token,address:token,first_detected_at:Number(existing?.first_detected_at??detectedAt),last_detected_at:detectedAt,detection_count:Number(existing?.detection_count??0)+(newObservation?1:0)};this.discoveryRows.set(token,row);
+    this.write(()=>this.mongo!.db.collection("discovery_decisions").updateOne({scope:this.scope,token},{$set:row},{upsert:true}));
+  }
+  discoveryDecisions(limit=50,status?:string):Json[]{return [...this.discoveryRows.values()].filter(row=>!status||row.status===status).sort((a,b)=>Number(b.last_detected_at)-Number(a.last_detected_at)).slice(0,Math.max(0,limit)).map(row=>structuredClone(row));}
   lastAlertAt(token:string,kind?:string):number {const key=kind?`${kind}:${token}`:token;return Math.max(0,...[...this.alertRows.values()].filter(row=>row.token===key).map(row=>Number(row.created_at)||0));}
   recordTrendingPrice(token:string,price:number,sampledAt=Math.floor(Date.now()/1000)):void {if(!Number.isFinite(price)||price<=0)return;const rows=(this.trendingPrices.get(token)??[]).filter(row=>Number(row.sampled_at)>=sampledAt-7200&&Number(row.sampled_at)!==sampledAt),entry={scope:this.scope,token,sampled_at:sampledAt,price};rows.push(entry);this.trendingPrices.set(token,rows);this.write(async()=>{await this.mongo!.db.collection("trending_prices").updateOne({scope:this.scope,token,sampled_at:sampledAt},{$set:entry},{upsert:true});await this.mongo!.db.collection("trending_prices").deleteMany({scope:this.scope,sampled_at:{$lt:sampledAt-7200}});});}
   trendingPriceChange(token:string,currentPrice:number,lookbackSeconds=1800,now=Math.floor(Date.now()/1000)):number|undefined {if(!Number.isFinite(currentPrice)||currentPrice<=0)return;const target=now-lookbackSeconds,row=(this.trendingPrices.get(token)??[]).filter(item=>Number(item.sampled_at)<=target).sort((a,b)=>Number(b.sampled_at)-Number(a.sampled_at))[0];if(!row||target-Number(row.sampled_at)>600||Number(row.price)<=0)return;return (currentPrice/Number(row.price)-1)*100;}

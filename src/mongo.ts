@@ -18,6 +18,8 @@ export async function initializeMongo(client:MongoClient,db:Db):Promise<MongoSta
     db.collection("trending_prices").createIndex({scope:1,token:1,sampled_at:-1}),
     db.collection("metric_samples").createIndex({scope:1,token:1,metric:1,sampled_at:-1}),
     db.collection("call_performance").createIndex({scope:1,token:1},{unique:true}),
+    db.collection("discovery_decisions").createIndex({scope:1,token:1},{unique:true}),
+    db.collection("discovery_decisions").createIndex({scope:1,status:1,last_detected_at:-1}),
     db.collection("tracked_wallets").createIndex({source:1,chain:1,wallet:1},{unique:true}),
   ]);
   return new MongoState(client,db);
